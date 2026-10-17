@@ -8,7 +8,7 @@ import { connect, lastConnectionError, listGraphs } from './connection.js';
 import { queryStats, recentTrace, takeUnsent } from './run.js';
 
 export { recallCharacter, recallStirred, recallWorld, recallRecent, houseLink } from './recall.js';
-export { graphSummary, graphSample } from './inspect.js';
+export { graphSummary, graphSample, nodeNeighbours } from './inspect.js';
 export { recentTrace, takeUnsent, listGraphs };
 
 export const nsDyn = pid => `rr-dyn-${pid}`;

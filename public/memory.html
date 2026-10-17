@@ -33,6 +33,15 @@
   .cy { margin:4px 0 14px; }
   .cy .m { font:15px 'Kalam', cursive; color:var(--ink-3); }
   .cy code { display:block; font:12.5px/1.45 'Consolas', 'Courier New', monospace; color:var(--red); word-break:break-word; margin-top:1px; }
+  #pick { margin-bottom:18px; }
+  #pick .nm { font:600 22px 'Cinzel', serif; margin:0 0 2px; }
+  #pick .what { font:15px 'Kalam', cursive; color:var(--ink-3); }
+  #pick .said { font:19px/1.3 'Kalam', cursive; margin:6px 0; }
+  #pick .row { display:block; width:100%; text-align:left; background:none; border:0; border-bottom:1.5px dashed rgba(79,59,37,.45); padding:4px 0; font:17px/1.25 'Kalam', cursive; color:var(--ink); cursor:pointer; }
+  #pick .row:hover { background:rgba(138,42,26,.08); }
+  #pick .row em { font-style:normal; color:var(--red); font-size:14px; letter-spacing:.04em; margin-right:6px; }
+  #pick .hint { font:16px 'Kalam', cursive; color:var(--ink-3); }
+  canvas { cursor:pointer; }
   #tip { position:fixed; pointer-events:none; max-width:300px; padding:5px 10px; font:16px/1.25 'Kalam', cursive; background:var(--parch-2); border:1.5px solid var(--ink); border-radius:4px 9px 5px 8px; box-shadow:2px 3px 0 rgba(42,29,16,.35); opacity:0; transition:opacity .1s; z-index:5; }
 </style>
 </head>
@@ -54,6 +63,7 @@
       <div class="key" id="key"></div>
     </div>
     <div>
+      <div id="pick"></div>
       <h2>Remembered</h2>
       <div id="mems"></div>
       <h2 style="margin-top:20px">Asked of the graph</h2>
@@ -69,7 +79,7 @@ let pid = ''; try { pid = localStorage.getItem('rb-pid') || ''; } catch {}
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;' }[c]));
 const hash = n => { let h = 2166136261; for (const c of String(n)) h = Math.imul(h ^ c.charCodeAt(0), 16777619); return (h >>> 0) / 4294967296; };
-let raf, drawn = [];
+let raf, drawn = [], view = null, sel = null;
 
 async function load() {
   $('err').textContent = '';
@@ -82,11 +92,17 @@ async function load() {
     if (g.error) throw new Error(g.error);
     const n = l => (g.nodes.find(x => x.label === l) || {}).n || 0;
     const e = (g.edges || []).reduce((a, x) => a + x.n, 0);
-    $('tally').innerHTML = `<b>${n('Memory')}</b> memories · <b>${n('Character')}</b> people · <b>${n('House')}</b> houses · <b>${e}</b> threads`;
+    const c = (k, one, many) => `<b>${k}</b> ${k === 1 ? one : many}`;
+    $('tally').innerHTML = [c(n('Memory'), 'memory', 'memories'), c(n('Character') + n('Ruler'), 'person', 'people'), c(n('House'), 'house', 'houses'), c(e, 'thread', 'threads')].join(' · ');
     drawGraph(g.sampleNodes || [], g.sampleEdges || []);
+    choose(null);
     $('mems').innerHTML = (g.sampleNodes || []).filter(x => x.label === 'Memory').slice(-6).reverse().map(x => `<div class="note">${esc(x.text)}<small>${esc(x.name)}</small></div>`).join('') || '<div class="note">Nothing yet.</div>';
-    $('trace').innerHTML = (t.trace || []).slice().reverse().map(q => `<div class="cy"><div class="m">${q.kind === 'write' ? 'wrote' : 'read'} · ${esc(q.label)} · ${q.ms} ms · ${q.rows} rows</div><code>${esc(q.cypher.slice(0, 300))}</code></div>`).join('') || '<div class="note">Nothing yet.</div>';
+    showTrace(t);
   } catch (er) { $('err').textContent = 'The graph would not answer: ' + er.message; }
+}
+
+function showTrace(t) {
+  $('trace').innerHTML = (t.trace || []).slice().reverse().map(q => `<div class="cy"><div class="m">${q.kind === 'write' ? 'wrote' : 'read'} · ${esc(q.label)} · ${q.ms} ms · ${q.rows} rows</div><code>${esc(q.cypher.slice(0, 300))}</code></div>`).join('') || '<div class="note">Nothing yet.</div>';
 }
 
 // A hand-inked map: wobbly threads, little drawn blobs, names written beside the people and houses.
@@ -108,26 +124,62 @@ function drawGraph(nodes, edges) {
   const links = edges.map(e => ({ a: byId.get(e.source), b: byId.get(e.target), type: e.type })).filter(l => l.a && l.b);
   const ns = [...byId.values()]; let step = 0; cancelAnimationFrame(raf);
   const R = n => (n.label === 'Memory' ? 7 : n.label === 'House' ? 14 : 11) * dpr;
+  view = { ns, links, W, H, dpr, R, ctx };
   (function tick() {
     for (const a of ns) for (const b of ns) if (a !== b) { const dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 80, d = Math.sqrt(d2), f = 3600 * dpr * dpr / d2; a.vx += dx / d * f; a.vy += dy / d * f; }
     for (const l of links) { const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y, d = Math.hypot(dx, dy) || 1, f = (d - 80 * dpr) * 0.02; l.a.vx += dx / d * f; l.a.vy += dy / d * f; l.b.vx -= dx / d * f; l.b.vy -= dy / d * f; }
     for (const n of ns) { n.vx += (W / 2 - n.x) * 0.004; n.vy += (H / 2 - n.y) * 0.004; n.x += n.vx *= 0.8; n.y += n.vy *= 0.8; n.x = Math.max(30 * dpr, Math.min(W - 30 * dpr, n.x)); n.y = Math.max(24 * dpr, Math.min(H - 24 * dpr, n.y)); }
-    ctx.clearRect(0, 0, W, H);
-    ctx.strokeStyle = INK; ctx.lineCap = 'round';
-    for (const l of links) { ctx.lineWidth = (l.type === 'ENTANGLED' ? 2.4 : 1.3) * dpr; ctx.globalAlpha = l.type === 'ENTANGLED' ? .85 : .55; ctx.setLineDash(l.type === 'ABOUT_HOUSE' ? [5 * dpr, 5 * dpr] : []); ctx.beginPath(); wobble(ctx, l.a.x, l.a.y, l.b.x, l.b.y, l.a.id + '>' + l.b.id, 18 * dpr); ctx.stroke(); }
-    ctx.setLineDash([]); ctx.globalAlpha = 1;
-    for (const n of ns) {
-      blob(ctx, n.x, n.y, R(n), n.id); ctx.fillStyle = WASH[n.label] || '#999'; ctx.fill(); ctx.lineWidth = 1.8 * dpr; ctx.strokeStyle = INK; ctx.stroke();
-      if (n.label !== 'Memory') { ctx.fillStyle = INK; ctx.font = `${(n.label === 'House' ? 19 : 16) * dpr}px Kalam, cursive`; ctx.fillText(n.name || '', n.x + (R(n) + 4 * dpr), n.y + 5 * dpr); }
-    }
-    drawn = ns.map(n => ({ n, r: R(n) }));
+    paint();
     if (++step < 260) raf = requestAnimationFrame(tick);
   })();
 }
+// Everything not joined to the chosen dot fades back, so its neighbourhood stands out.
+function paint() {
+  const { ns, links, W, H, dpr, R, ctx } = view;
+  const near = sel == null ? null : new Set([sel, ...links.filter(l => l.a.id === sel || l.b.id === sel).flatMap(l => [l.a.id, l.b.id])]);
+  ctx.clearRect(0, 0, W, H);
+  ctx.strokeStyle = INK; ctx.lineCap = 'round';
+  for (const l of links) {
+    const on = !near || (l.a.id === sel || l.b.id === sel);
+    ctx.lineWidth = (l.type === 'ENTANGLED' ? 2.4 : 1.3) * dpr * (near && on ? 1.5 : 1); ctx.globalAlpha = on ? (l.type === 'ENTANGLED' ? .85 : .6) : .1;
+    ctx.setLineDash(l.type === 'ABOUT_HOUSE' ? [5 * dpr, 5 * dpr] : []); ctx.beginPath(); wobble(ctx, l.a.x, l.a.y, l.b.x, l.b.y, l.a.id + '>' + l.b.id, 18 * dpr); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  for (const n of ns) {
+    ctx.globalAlpha = !near || near.has(n.id) ? 1 : .18;
+    blob(ctx, n.x, n.y, R(n) * (n.id === sel ? 1.35 : 1), n.id); ctx.fillStyle = WASH[n.label] || '#999'; ctx.fill(); ctx.lineWidth = (n.id === sel ? 3 : 1.8) * dpr; ctx.strokeStyle = INK; ctx.stroke();
+    if (n.label !== 'Memory' || n.id === sel) { ctx.fillStyle = INK; ctx.font = `${(n.label === 'House' ? 19 : 16) * dpr}px Kalam, cursive`; ctx.fillText(n.label === 'Memory' ? 'this memory' : (n.name || ''), n.x + (R(n) + 4 * dpr), n.y + 5 * dpr); }
+  }
+  ctx.globalAlpha = 1;
+  drawn = ns.map(n => ({ n, r: R(n) }));
+}
+
+// Click a dot: the graph is asked for that node and everything joined to it, and the answer is written beside the map.
+const PLAIN = { ABOUT: 'about', ABOUT_HOUSE: 'concerns house', MEMBER_OF: 'belongs to', RECORDED: 'recorded by', ENTANGLED: 'entangled with' };
+async function choose(id) {
+  sel = id; if (view) paint();
+  if (id == null) { $('pick').innerHTML = '<div class="hint">Click a dot to ask the graph about it.</div>'; return; }
+  $('pick').innerHTML = '<div class="hint">asking…</div>';
+  try {
+    const r = await fetch(`/api/memory/node?pid=${encodeURIComponent(pid)}&id=${id}`).then(x => x.json());
+    if (r.error) throw new Error(r.error);
+    if (sel !== id) return;
+    const p = r.props || {}, title = r.label === 'Memory' ? 'A memory' : (p.name || r.label);
+    const kind = { Memory: [p.kind, p.date && 'year ' + p.date].filter(Boolean).join(' · '), Character: [p.title, p.house].filter(Boolean).join(' of '), House: 'a house', Ruler: 'a ruler' }[r.label] || '';
+    $('pick').innerHTML = `<h3 class="nm">${esc(title)}</h3><div class="what">${esc(kind)}</div>` + (r.label === 'Memory' ? `<div class="said">${esc(p.text)}</div>` : '') +
+      (r.links || []).map(l => `<button class="row" data-id="${l.id}"><em>${l.out ? '' : '← '}${esc(PLAIN[l.type] || l.type)}${l.n > 1 ? ' ×' + l.n : ''}</em>${esc(l.label === 'Memory' ? (l.text || l.name) : l.name)}</button>`).join('');
+    fetch('/api/memory/trace?n=10').then(x => x.json()).then(showTrace).catch(() => { });
+  } catch (er) { $('pick').innerHTML = `<div class="hint">The graph would not answer: ${esc(er.message)}</div>`; }
+}
+$('pick').addEventListener('click', ev => { const b = ev.target.closest('.row'); if (b) choose(+b.dataset.id); });
+$('cv').addEventListener('click', ev => { const o = hitAt(ev); choose(o ? o.n.id : null); });
+function hitAt(ev) {
+  const rc = $('cv').getBoundingClientRect(), k = $('cv').width / rc.width, x = (ev.clientX - rc.left) * k, y = (ev.clientY - rc.top) * k;
+  return drawn.find(o => Math.hypot(o.n.x - x, o.n.y - y) < o.r + 6);
+}
 // Hover a dot to read what it is.
 $('cv').addEventListener('mousemove', ev => {
-  const rc = $('cv').getBoundingClientRect(), k = ($('cv').width / rc.width), x = (ev.clientX - rc.left) * k, y = (ev.clientY - rc.top) * k;
-  const hit = drawn.find(o => Math.hypot(o.n.x - x, o.n.y - y) < o.r + 4);
+  const hit = hitAt(ev);
   const tip = $('tip');
   if (!hit) { tip.style.opacity = 0; return; }
   tip.textContent = hit.n.label === 'Memory' ? hit.n.text : hit.n.name;

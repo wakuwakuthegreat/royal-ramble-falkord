@@ -7,6 +7,16 @@ export async function graphSummary(ns) {
   return { nodes, edges };
 }
 
+/** One node and everything it is joined to, one hop out (what the ledger shows when a dot is clicked). */
+export async function nodeNeighbours(ns, id) {
+  const [self] = await run(ns, 'node', 'MATCH (n) WHERE id(n) = $id RETURN labels(n)[0] AS label, properties(n) AS props', { id });
+  if (!self) return null;
+  const links = await run(ns, 'node-neighbours', `MATCH (n)-[r]-(m) WHERE id(n) = $id
+    RETURN type(r) AS type, id(startNode(r)) = id(n) AS out, r.n AS n, id(m) AS id, labels(m)[0] AS label, coalesce(m.name, m.kind) AS name, m.text AS text, m.date AS date
+    ORDER BY m.at DESC LIMIT 40`, { id });
+  return { ...self, links };
+}
+
 /** Nodes and edges around the cast, capped, shaped for a force-graph or a table. */
 export async function graphSample(ns, limit = 120) {
   const nodes = await run(ns, 'sample-nodes', `MATCH (n) RETURN id(n) AS id, labels(n)[0] AS label, coalesce(n.name, n.kind) AS name, n.text AS text LIMIT $limit`, { limit });
