@@ -152,7 +152,7 @@ Other graph queries the agents call as tools:
 - **`recallStirred`**: every player message runs `CALL db.idx.fulltext.queryNodes('Memory', $words)` and keeps hits that concern the character or their house, so a sentence can stir a specific old memory ("didn't you promise me *gold*?").
 - **`houseLink`**: a graph algorithm, `shortestPath((a:House)-[:ENTANGLED*..4]->(b:House))`, finds how two families are tied through third parties; the prompt then knows "House Moth → House Raven → House Stag" and may use it.
 - **`recallWorld`**: full-text or recent spread over `rr-world` for gossip from distant realms.
-- Proof endpoints: `GET /api/memory/graph?pid=…[&sample=1]` (node and edge counts, a sample of the graph) and `GET /api/memory/trace` (the last Cypher queries, their parameters, timings and row counts). FalkorDB Browser at `http://localhost:3000` lets you run your own.
+- Proof endpoints: `GET /api/memory/graph?pid=…[&sample=1]` (node and edge counts, a sample of the graph) and `GET /api/memory/trace` (the last Cypher queries with timings and row counts). `/memory.html` draws both for the current browser, no player id needed. FalkorDB Browser at `http://localhost:3000` lets you run your own.
 
 **Across campaigns.** A new campaign keeps the same world seed (realm and house names are stable), set a generation later. Your dynasty graph persists, so the great houses still tell stories about your ancestors.
 

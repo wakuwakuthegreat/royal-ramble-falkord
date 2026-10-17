@@ -5,7 +5,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const URL = (process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/$/, '');
+// Vercel's filesystem is read-only except /tmp: default the data folder there so a missing DATA_DIR cannot crash the function.
+// (This module is imported first by server/index.js, so the others see it.)
+if (process.env.VERCEL && !process.env.DATA_DIR) process.env.DATA_DIR = '/tmp/rr-data';
+
+const URL =(process.env.UPSTASH_REDIS_REST_URL || '').replace(/\/$/, '');
 const TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || '';
 export const remote = !!(URL && TOKEN);
 const PREFIX = process.env.STORE_PREFIX || 'rb:'; // local dev uses its own prefix so test worlds never mix with the live ones
@@ -59,6 +63,9 @@ export const kv = {
   async get(key) { const v = await redis('GET', PREFIX + key); return v == null ? null : JSON.parse(v); },
   async set(key, val, ttlSec) { await redis(...(ttlSec ? ['SET', PREFIX + key, JSON.stringify(val), 'EX', ttlSec] : ['SET', PREFIX + key, JSON.stringify(val)])); },
   async del(key) { await redis('DEL', PREFIX + key); },
+  /** Append to a capped list (newest last). */
+  async push(key, items, max) { await redis('RPUSH', PREFIX + key, ...items.map(i => JSON.stringify(i))); await redis('LTRIM', PREFIX + key, -max, -1); },
+  async list(key, n) { return ((await redis('LRANGE', PREFIX + key, -n, -1)) || []).map(s => JSON.parse(s)); },
 };
 
 // Copy everything back to disk before the rest of the server reads it (always-on hosts only).

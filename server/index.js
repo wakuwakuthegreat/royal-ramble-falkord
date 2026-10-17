@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { chatJSON, llmInfo, fallbackInfo } from './llm.js';
-import { rememberMany, recallCharacter, recallStirred, recallWorld, houseLink, graphSummary, graphSample, recentTrace, ready, nsDyn, nsMpDyn, nsRoom, NS_WORLD, memoryStats } from './memory/index.js';
+import { rememberMany, recallCharacter, recallStirred, recallWorld, houseLink, graphSummary, graphSample, recentTrace, takeUnsent, ready, nsDyn, nsMpDyn, nsRoom, NS_WORLD, memoryStats } from './memory/index.js';
 import { listWorlds, createSharedWorld, deleteWorld, publicWorld, join, leave, view, act, withWorldPlayer } from './worlds.js';
 import { audienceContext, disposition, applyExchange, finishAudience, ACTIONS } from '../shared/actions.js';
 import { opinionOf } from '../shared/world.js';
@@ -107,10 +107,22 @@ app.get('/api/memory/graph', async (req, res) => {
   if (!pid) return res.status(400).json({ error: 'bad pid' });
   try {
     const ns = req.query.world ? NS_WORLD : nsDyn(pid);
-    res.json({ graph: ns, ...(await graphSummary(ns)), ...(req.query.sample ? await graphSample(ns) : {}) });
+    const sample = req.query.sample ? await graphSample(ns) : null;
+    res.json({ graph: ns, ...(await graphSummary(ns)), ...(sample && { sampleNodes: sample.nodes, sampleEdges: sample.edges }) });
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
-app.get('/api/memory/trace', (req, res) => res.json({ trace: recentTrace().slice(-(+req.query.n || 20)) }));
+app.get('/api/memory/trace', async (req, res) => {
+  const n = Math.min(60, +req.query.n || 20);
+  try { res.json({ trace: serverless && remote ? await kv.list('trace', n) : recentTrace().slice(-n) }); }
+  catch (e) { res.status(502).json({ error: e.message }); }
+});
+// Serverless: hand this request's queries to Redis before answering, or the next function instance would never see them.
+if (serverless && remote) app.use('/api', (req, res, next) => {
+  if (req.path === '/memory/trace') return next();
+  const json = res.json.bind(res);
+  res.json = body => { const t = takeUnsent(); (t.length ? kv.push('trace', t, 60) : Promise.resolve()).catch(() => { }).finally(() => json(body)); return res; };
+  next();
+});
 
 // ---------------------------------------------------------------- shared worlds
 const wrap = fn => (req, res) => { try { res.json(fn(req)); } catch (e) { res.status(e.status || 400).json({ error: e.message }); } };

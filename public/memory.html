@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Graph · Royal Ramble</title>
+<style>
+  :root { --bg:#f1e6cc; --ink:#2b2118; --dim:#7a6a55; --card:#fbf4e1; --line:#cdb98f; --acc:#8c2f1b; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#1e1a15; --ink:#efe3c8; --dim:#a8987c; --card:#28231c; --line:#4a4033; --acc:#e0805f; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 Georgia, serif; }
+  main { max-width:1100px; margin:0 auto; padding:20px 16px 60px; }
+  h1 { font-size:26px; margin:0 0 4px; } h2 { font-size:17px; margin:0 0 8px; }
+  p.sub { color:var(--dim); margin:0 0 18px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; } @media (max-width:760px){ .grid{grid-template-columns:1fr;} }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:6px; padding:14px; margin-bottom:14px; }
+  canvas { width:100%; height:420px; display:block; background:var(--card); border-radius:4px; }
+  table { border-collapse:collapse; width:100%; } td,th { text-align:left; padding:2px 8px 2px 0; font-size:14px; }
+  code, .cy { font:12.5px/1.4 ui-monospace, Consolas, monospace; }
+  .q { border-top:1px dashed var(--line); padding:6px 0; } .q .meta { color:var(--dim); font-size:12px; } .q .cy { color:var(--acc); word-break:break-word; }
+  .legend span { margin-right:12px; font-size:13px; } .legend i { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; }
+  button { font:inherit; padding:5px 12px; border:1px solid var(--line); background:var(--card); color:var(--ink); border-radius:4px; cursor:pointer; }
+  #err { color:var(--acc); }
+</style>
+</head>
+<body>
+<main>
+  <h1>The memory graph</h1>
+  <p class="sub">Everything below is read live from FalkorDB. Your dynasty owns one graph: <code id="gname">…</code> <button id="reload">Refresh</button></p>
+  <p id="err"></p>
+  <div class="grid">
+    <div>
+      <div class="card"><h2>Nodes &amp; edges</h2><div id="counts">loading…</div></div>
+      <div class="card"><h2>Graph</h2><div class="legend" id="legend"></div><canvas id="cv" width="560" height="420"></canvas></div>
+    </div>
+    <div>
+      <div class="card"><h2>Latest memories written to the graph</h2><div id="mems">loading…</div></div>
+      <div class="card"><h2>Cypher the game just ran</h2><div id="trace">loading…</div></div>
+    </div>
+  </div>
+</main>
+<script>
+const COLOR = { Memory:'#c9892c', Character:'#3b7a57', House:'#8c2f1b', Ruler:'#3b5f8c' };
+let pid = ''; try { pid = localStorage.getItem('rb-pid') || ''; } catch {}
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;' }[c]));
+let raf;
+
+async function load() {
+  $('err').textContent = '';
+  if (!pid) { $('err').textContent = 'No player id in this browser yet. Play a few turns in the game first (same site), then refresh.'; return; }
+  $('gname').textContent = 'rr-dyn-' + pid;
+  try {
+    const [g, t] = await Promise.all([
+      fetch('/api/memory/graph?sample=1&pid=' + encodeURIComponent(pid)).then(r => r.json()),
+      fetch('/api/memory/trace?n=12').then(r => r.json()),
+    ]);
+    if (g.error) throw new Error(g.error);
+    $('counts').innerHTML = '<table>' + (g.nodes || []).map(r => `<tr><td>${esc(r[0] ?? r.label)}</td><td><b>${r[1] ?? r.n}</b> nodes</td></tr>`).join('') +
+      (g.edges || []).map(r => `<tr><td>${esc(r[0] ?? r.type)}</td><td><b>${r[1] ?? r.n}</b> edges</td></tr>`).join('') + '</table>' || 'empty graph';
+    drawGraph(g.sampleNodes || [], g.sampleEdges || []);
+    $('mems').innerHTML = (g.sampleNodes || []).filter(n => n.label === 'Memory').slice(-8).reverse().map(n => `<div class="q">${esc(n.text)}</div>`).join('') || 'No memories yet. Hold an audience and end it.';
+    $('trace').innerHTML = (t.trace || []).slice().reverse().map(q => `<div class="q"><div class="meta">${esc(q.kind)} · ${esc(q.label)} · ${q.ms} ms · ${q.rows} rows</div><div class="cy">${esc(q.cypher.slice(0, 420))}</div></div>`).join('') || 'No queries yet.';
+  } catch (e) { $('err').textContent = 'Could not read the graph: ' + e.message; }
+}
+
+function drawGraph(nodes, edges) {
+  const cv = $('cv'), ctx = cv.getContext('2d'), W = cv.width = cv.clientWidth * devicePixelRatio, H = cv.height = cv.clientHeight * devicePixelRatio;
+  const used = {}; nodes.forEach(n => used[n.label] = 1);
+  $('legend').innerHTML = Object.keys(used).map(l => `<span><i style="background:${COLOR[l] || '#888'}"></i>${l}</span>`).join('');
+  const byId = new Map(nodes.map(n => [n.id, { ...n, x: W / 2 + (Math.random() - .5) * W / 2, y: H / 2 + (Math.random() - .5) * H / 2, vx: 0, vy: 0 }]));
+  const links = edges.map(e => ({ a: byId.get(e.source), b: byId.get(e.target), type: e.type })).filter(l => l.a && l.b);
+  const ns = [...byId.values()]; let step = 0; cancelAnimationFrame(raf);
+  const dpr = devicePixelRatio;
+  (function tick() {
+    for (const a of ns) for (const b of ns) if (a !== b) { const dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy + 80, f = 2600 * dpr / d2; a.vx += dx * f / Math.sqrt(d2); a.vy += dy * f / Math.sqrt(d2); }
+    for (const l of links) { const dx = l.b.x - l.a.x, dy = l.b.y - l.a.y, d = Math.hypot(dx, dy) || 1, f = (d - 70 * dpr) * 0.02; l.a.vx += dx / d * f; l.a.vy += dy / d * f; l.b.vx -= dx / d * f; l.b.vy -= dy / d * f; }
+    for (const n of ns) { n.vx += (W / 2 - n.x) * 0.004; n.vy += (H / 2 - n.y) * 0.004; n.x += n.vx *= 0.8; n.y += n.vy *= 0.8; n.x = Math.max(10, Math.min(W - 10, n.x)); n.y = Math.max(10, Math.min(H - 10, n.y)); }
+    ctx.clearRect(0, 0, W, H); ctx.lineWidth = dpr; ctx.strokeStyle = 'rgba(120,100,70,.45)';
+    for (const l of links) { ctx.beginPath(); ctx.moveTo(l.a.x, l.a.y); ctx.lineTo(l.b.x, l.b.y); ctx.stroke(); }
+    for (const n of ns) { ctx.fillStyle = COLOR[n.label] || '#888'; ctx.beginPath(); ctx.arc(n.x, n.y, (n.label === 'Memory' ? 4 : 7) * dpr, 0, 7); ctx.fill();
+      if (n.label !== 'Memory') { ctx.fillStyle = getComputedStyle(document.body).color; ctx.font = `${11 * dpr}px Georgia`; ctx.fillText(n.name || '', n.x + 9 * dpr, n.y + 4 * dpr); } }
+    if (++step < 260) raf = requestAnimationFrame(tick);
+  })();
+}
+$('reload').onclick = load; load();
+</script>
+</body>
+</html>

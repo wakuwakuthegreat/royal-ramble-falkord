@@ -1,8 +1,9 @@
 node_modules/
 dist/
 .env
-data/
+.env.*
+!.env.example
+# runtime data folder at the repo root only (public/portrait/js/data is source code and must be committed)
+/data/
 *.log
-
 .vercel
-.env*

@@ -5,11 +5,11 @@
 import { normalize } from './normalize.js';
 import { writeMemory } from './write.js';
 import { connect, lastConnectionError, listGraphs } from './connection.js';
-import { queryStats, recentTrace } from './run.js';
+import { queryStats, recentTrace, takeUnsent } from './run.js';
 
 export { recallCharacter, recallStirred, recallWorld, recallRecent, houseLink } from './recall.js';
 export { graphSummary, graphSample } from './inspect.js';
-export { recentTrace, listGraphs };
+export { recentTrace, takeUnsent, listGraphs };
 
 export const nsDyn = pid => `rr-dyn-${pid}`;
 export const nsMpDyn = (worldId, pid) => `rr-dyn-${pid}-${worldId}`;
