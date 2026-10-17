@@ -1,0 +1,30 @@
+# FalkorDB (the memory graph) + the game.
+#   docker compose up falkordb          just the database, for `npm run dev`
+#   docker compose up --build           database and game together on http://localhost:8080
+# FalkorDB Browser (inspect the graphs, run Cypher) is on http://localhost:3000.
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6379"
+      - "3000:3000"
+    volumes:
+      - falkor-data:/var/lib/falkordb/data
+    restart: unless-stopped
+
+  app:
+    build: .
+    depends_on:
+      - falkordb
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      FALKORDB_URL: falkor://falkordb:6379
+    volumes:
+      - rr-data:/data
+
+volumes:
+  falkor-data:
+  rr-data:

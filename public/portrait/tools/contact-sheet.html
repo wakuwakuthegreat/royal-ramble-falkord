@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contact Sheet</title>
+  <style>
+    body { margin: 0; padding: 16px; font: 15px/1.4 system-ui, sans-serif; background: #e9dcc0; color: #1a1410; }
+    header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+    select, button { font: inherit; padding: 3px 8px; }
+    #out { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; }
+    figure { margin: 0; background: #f6eed9; border: 2px solid #1a1410; padding: 4px; }
+    figcaption { font-size: 13px; text-align: center; }
+    canvas { width: 100%; height: auto; display: block; }
+    #err { color: #a8462c; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>Contact sheet</strong> — renders every entry of a registry category so you can eyeball new parts.
+    <label>Category <select id="cat"></select></label>
+    <label>Style <select id="style"></select></label>
+    <button id="reroll" type="button">New faces</button>
+  </header>
+  <pre id="err"></pre>
+  <div id="out"></div>
+
+  <script src="../js/core/util.js"></script>
+  <script src="../js/core/registry.js"></script>
+  <script src="../js/core/painter.js"></script>
+  <script src="../js/core/geometry.js"></script>
+  <script src="../js/data/swatches.js"></script>
+  <script src="../js/data/controls.js"></script>
+  <script src="../js/data/styles.js"></script>
+  <script src="../js/data/paper-texture.js"></script>
+  <script src="../js/parts/patterns.js"></script>
+  <script src="../js/parts/features.js"></script>
+  <script src="../js/parts/hair.js"></script>
+  <script src="../js/parts/headwear.js"></script>
+  <script src="../js/parts/clothing.js"></script>
+  <script src="../js/parts/jewelry.js"></script>
+  <script src="../js/parts/regalia.js"></script>
+  <script src="../js/parts/accessories.js"></script>
+  <script src="../js/parts/modern.js"></script>
+  <script src="../js/parts/world-regalia.js"></script>
+  <script src="../js/parts/fiction-parts.js"></script>
+  <script src="../js/parts/heroes.js"></script>
+  <script src="../js/parts/expressions.js"></script>
+  <script src="../js/data/archetypes.js"></script>
+  <script src="../js/data/archetypes-modern.js"></script>
+  <script src="../js/data/roles.js"></script>
+  <script src="../js/core/generator.js"></script>
+  <script src="../js/core/render.js"></script>
+  <script src="../js/extensions/example.js"></script>
+  <script src="../js/core/genetics.js"></script>
+  <script src="../js/data/fiction.js"></script>
+  <script>
+    // category → genome key it drives
+    const KEYS = { hair: 'hairStyle', headwear: 'headwear', clothing: 'clothing', patterns: 'pattern', earrings: 'earrings', necklaces: 'necklace', eyewear: 'eyewear', facialHair: 'facialHair', marks: 'marks', accessories: 'accessories', roles: 'role', fiction: 'fiction', eyeShapes: 'eyeShape', noses: 'noseStyle', styles: 'style', backgrounds: 'background', archetypes: 'archetype' };
+    const q = new URLSearchParams(location.search);
+    const catSel = document.getElementById('cat'), styleSel = document.getElementById('style');
+    Object.keys(KEYS).forEach(k => catSel.add(new Option(k, k)));
+    PM.list('styles').forEach(s => styleSel.add(new Option(s.label, s.id)));
+    catSel.value = q.get('cat') || 'hair';
+    styleSel.value = q.get('style') || 'ink-ochre';
+    let salt = +(q.get('salt') || 0);
+    console.warn = (...a) => { document.getElementById('err').textContent += a.join(' ') + '\n'; };
+
+    function run() {
+      const out = document.getElementById('out'); out.innerHTML = '';
+      const cat = catSel.value, key = KEYS[cat], arch = PM.list('archetypes');
+      PM.list(cat).forEach((item, i) => {
+        const fig = document.createElement('figure'), cv = document.createElement('canvas');
+        cv.width = 400; cv.height = 500;
+        fig.append(cv, Object.assign(document.createElement('figcaption'), { textContent: item.label + ' (' + item.id + ')' }));
+        out.appendChild(fig);
+        let g = PM.generate({ seed: 300 + i + salt * 1000, archetype: cat === 'archetypes' ? item.id : arch[i % arch.length].id, gender: ['fem', 'masc', 'andro'][i % 3],
+          base: { style: styleSel.value, toneMix: 0.35, lineWeight: 1, wobble: 1, background: 'paper', role: q.get('role') || 'everyday' } });
+        if (cat === 'marks') g.marks = [item.id];
+        else if (cat === 'accessories') g.accessories = [item.id];
+        else if (cat === 'roles') { g.role = item.id; PM.dressForRole(g); }
+        else if (cat === 'fiction') { g = PM.fictionGenome(item.id, { base: { style: styleSel.value } }); }
+        else if (cat !== 'archetypes') g[key] = item.id;
+        if (cat === 'hair' || cat === 'facialHair') g.headwear = 'none';
+        if (cat === 'facialHair') g.gender = 'masc';
+        if (cat === 'patterns') { g.clothing = 'crew'; }
+        setTimeout(() => { try { PM.render(cv, g); } catch (e) { console.warn(item.id + ': ' + e.message); } }, i * 10);
+      });
+    }
+    catSel.onchange = styleSel.onchange = run;
+    document.getElementById('reroll').onclick = () => { salt++; run(); };
+    run();
+  </script>
+</body>
+</html>

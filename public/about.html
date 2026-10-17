@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>How Royal Ramble Works</title>
+<meta name="description" content="How the court, the schemes, the secrets, the wars and the memory fit together." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=IM+Fell+English:ital@0;1&family=IM+Fell+English+SC&family=Kalam:wght@400;700&display=swap" rel="stylesheet" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>👑</text></svg>" />
+<style>
+  :root {
+    --parch: #ecdfbf; --parch-2: #e0cfa4; --parch-3: #c4ae7c; --ink: #2a1d10; --ink-2: #4f3b25; --ink-3: #7f6a4e;
+    --red: #8a2a1a; --gold: #b8901f; --green: #3f6a2f; --blue: #3d5a6e;
+    --serif: 'IM Fell English', Georgia, serif; --sc: 'IM Fell English SC', Georgia, serif; --hand: 'Kalam', cursive;
+  }
+  @media (prefers-color-scheme: dark) { :root { --parch: #2a2217; --parch-2: #332a1c; --parch-3: #5a4a30; --ink: #f1e6c8; --ink-2: #d8c9a2; --ink-3: #a89870; --red: #e0826a; --gold: #e0b84a; --green: #8fbf72; --blue: #8fb4cc; } }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: #6f8584; color: var(--ink); font-family: var(--serif); font-size: 18px; line-height: 1.55; }
+  @media (prefers-color-scheme: dark) { body { background: #1b2423; } }
+  .sheet { max-width: 980px; margin: 22px auto 60px; background: var(--parch); padding: 8px 0 40px; position: relative; box-shadow: 0 10px 40px rgba(0,0,0,.35); }
+  .sheet::before { content: ''; position: absolute; inset: 8px; border: 2.4px solid var(--ink); border-radius: 6px 12px 7px 10px / 10px 6px 12px 7px; pointer-events: none; filter: url(#rough); }
+  .sheet::after { content: ''; position: absolute; inset: 14px; border: 1px solid var(--ink-3); pointer-events: none; filter: url(#rough2); }
+  header { text-align: center; padding: 40px 30px 10px; }
+  header .crown { width: 74px; }
+  h1 { font-family: var(--sc); font-weight: normal; font-size: clamp(38px, 7vw, 62px); margin: 6px 0 0; letter-spacing: .04em; line-height: 1; filter: url(#bleed); }
+  .tag { font-family: var(--hand); color: var(--red); font-size: 22px; margin: 6px 0 14px; }
+  nav { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; padding: 6px 24px 8px; position: sticky; top: 0; z-index: 5; background: var(--parch); }
+  nav a, .btn { font-family: var(--sc); color: var(--ink); text-decoration: none; padding: 4px 12px; font-size: 16px; position: relative; display: inline-block; }
+  nav a::before, .btn::before { content: ''; position: absolute; inset: 0; border: 1.6px solid var(--ink-2); border-radius: 10px 4px 9px 5px; filter: url(#rough2); }
+  nav a:hover, .btn:hover { background: rgba(255, 226, 150, .35); }
+  .btn.play { background: var(--red); color: #fbf0d4; } .btn.play::before { border-color: var(--ink); }
+  section { padding: 34px 54px 6px; }
+  h2 { font-family: var(--sc); font-weight: normal; font-size: 32px; margin: 0 0 4px; color: var(--ink); }
+  h2 small { display: block; font-family: var(--hand); font-size: 18px; color: var(--ink-3); margin-top: -2px; }
+  .swash { height: 10px; width: 190px; margin: 0 0 14px; color: var(--ink-2); }
+  h3 { font-family: var(--sc); font-weight: normal; font-size: 21px; margin: 0 0 4px; color: var(--ink-2); }
+  p { margin: 0 0 12px; }
+  .lede { font-size: 20px; color: var(--ink-2); }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); margin: 16px 0; }
+  .card { position: relative; padding: 13px 16px 12px; background: rgba(255, 250, 235, .35); }
+  @media (prefers-color-scheme: dark) { .card { background: rgba(255, 250, 235, .05); } }
+  .card::before { content: ''; position: absolute; inset: 0; border: 1.5px solid var(--ink-2); border-radius: 8px 3px 7px 4px; filter: url(#rough2); pointer-events: none; }
+  .card .ic { font-size: 30px; line-height: 1; display: block; margin-bottom: 4px; }
+  .card p { font-size: 16px; margin: 0; color: var(--ink-2); }
+  .note { font-family: var(--hand); color: var(--red); font-size: 19px; }
+  figure { margin: 18px 0; text-align: center; }
+  figure svg { width: 100%; height: auto; max-width: 860px; }
+  figcaption { font-family: var(--hand); color: var(--ink-3); font-size: 16px; }
+  svg text { font-family: var(--sc); fill: var(--ink); }
+  svg .hand { font-family: var(--hand); fill: var(--ink-2); }
+  svg .box { fill: var(--parch-2); stroke: var(--ink); stroke-width: 2; filter: url(#rough2); }
+  svg .box.red { fill: color-mix(in srgb, var(--red) 22%, var(--parch)); }
+  svg .box.gold { fill: color-mix(in srgb, var(--gold) 28%, var(--parch)); }
+  svg .box.green { fill: color-mix(in srgb, var(--green) 24%, var(--parch)); }
+  svg .box.blue { fill: color-mix(in srgb, var(--blue) 24%, var(--parch)); }
+  svg .arrow { stroke: var(--ink); stroke-width: 2.2; fill: none; filter: url(#rough2); marker-end: url(#head); }
+  svg .arrow.dash { stroke-dasharray: 6 5; stroke: var(--ink-3); }
+  table { width: 100%; border-collapse: collapse; font-size: 16px; margin: 10px 0 16px; }
+  th { font-family: var(--sc); font-weight: normal; text-align: left; color: var(--ink-2); border-bottom: 2px solid var(--ink-2); padding: 4px 8px; }
+  td { padding: 5px 8px; border-bottom: 1px dashed var(--parch-3); vertical-align: top; }
+  td:first-child { white-space: nowrap; font-family: var(--sc); }
+  .pill { display: inline-block; font-size: 14px; padding: 0 9px; margin: 1px 2px; position: relative; }
+  .pill::before { content: ''; position: absolute; inset: 0; border: 1.2px solid var(--ink-3); border-radius: 10px 3px 9px 4px; filter: url(#rough2); }
+  .two { display: grid; gap: 28px; grid-template-columns: 1fr 1fr; align-items: start; }
+  @media (max-width: 760px) { section { padding: 28px 22px 4px; } .two { grid-template-columns: 1fr; } .sheet { margin: 0; } }
+  .steps { counter-reset: s; list-style: none; padding: 0; margin: 10px 0; }
+  .steps li { counter-increment: s; position: relative; padding: 4px 0 8px 44px; }
+  .steps li::before { content: counter(s); position: absolute; left: 0; top: 2px; width: 31px; height: 31px; text-align: center; font-family: var(--sc); font-size: 19px; line-height: 29px; color: var(--parch); background: var(--ink-2); border-radius: 50%; }
+  footer { text-align: center; padding: 28px 30px 6px; color: var(--ink-3); font-size: 16px; }
+  .reveal { opacity: 0; transform: translateY(14px); transition: opacity .6s, transform .6s; }
+  .reveal.in { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } html { scroll-behavior: auto; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <filter id="rough"><feTurbulence type="fractalNoise" baseFrequency="0.035" numOctaves="2" seed="3" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="3.2"/></filter>
+    <filter id="rough2"><feTurbulence type="fractalNoise" baseFrequency="0.06" numOctaves="2" seed="8" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="2"/></filter>
+    <filter id="bleed"><feTurbulence type="fractalNoise" baseFrequency="0.9" numOctaves="2" seed="2" result="n"/><feDisplacementMap in="SourceGraphic" in2="n" scale="1.4"/></filter>
+    <marker id="head" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M1 1 L9 5 L1 9" fill="none" stroke="currentColor" stroke-width="1.8" style="stroke:var(--ink)"/></marker>
+  </defs>
+</svg>
+
+<div class="sheet">
+  <header>
+    <svg class="crown" viewBox="0 0 70 44" aria-hidden="true"><g fill="#d4ac34" stroke="#2a1d10" stroke-width="2" stroke-linejoin="round" filter="url(#rough2)"><path d="M6 38 L4 10 L20 24 L35 4 L50 24 L66 10 L64 38 Z"/><path d="M6 38 H64 V43 H6Z" fill="#a8302a"/></g><g fill="#f1e8d0" stroke="#2a1d10" stroke-width="1.4"><circle cx="4" cy="9" r="3"/><circle cx="35" cy="4" r="3.4"/><circle cx="66" cy="9" r="3"/></g></svg>
+    <h1>Royal Ramble</h1>
+    <div class="tag">How the whole thing fits together</div>
+    <p class="lede">A court game where nobody follows a script. Every person has a nature, a memory and a grudge; the rest is what they do about it.</p>
+    <p><a class="btn play" href="/">▶ Back to the game</a></p>
+  </header>
+  <nav>
+    <a href="#season">A season</a><a href="#people">People</a><a href="#schemes">Schemes</a><a href="#secrets">Secrets</a><a href="#sins">Sins</a><a href="#war">War</a><a href="#fall">Rise &amp; fall</a><a href="#talk">Talking</a><a href="#world">Shared worlds</a>
+  </nav>
+
+  <section id="season" class="reveal">
+    <h2>One season <small>the only clock there is</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <p>You get one move at a time, but the world gets four a year. When a season turns, everything below happens in order, to you and to everyone else.</p>
+    <figure>
+      <svg viewBox="0 0 860 190" role="img" aria-label="The order of a season">
+        <g>
+          <rect class="box gold" x="10" y="50" width="150" height="86" rx="10"/><text x="85" y="84" text-anchor="middle" font-size="19">Time passes</text><text class="hand" x="85" y="108" text-anchor="middle" font-size="14">income, levies, a new 🔔</text>
+          <rect class="box" x="195" y="50" width="150" height="86" rx="10"/><text x="270" y="84" text-anchor="middle" font-size="19">Life &amp; death</text><text class="hand" x="270" y="108" text-anchor="middle" font-size="14">births, illness, duels</text>
+          <rect class="box red" x="380" y="50" width="150" height="86" rx="10"/><text x="455" y="84" text-anchor="middle" font-size="19">The shadows</text><text class="hand" x="455" y="108" text-anchor="middle" font-size="14">schemes advance, secrets leak</text>
+          <rect class="box blue" x="565" y="50" width="130" height="86" rx="10"/><text x="630" y="84" text-anchor="middle" font-size="19">Wars</text><text class="hand" x="630" y="108" text-anchor="middle" font-size="14">a battle, allies bleed</text>
+          <rect class="box green" x="730" y="50" width="120" height="86" rx="10"/><text x="790" y="84" text-anchor="middle" font-size="19">Your desk</text><text class="hand" x="790" y="108" text-anchor="middle" font-size="14">events wait for you</text>
+          <path class="arrow" d="M162 93 H192"/><path class="arrow" d="M347 93 H377"/><path class="arrow" d="M532 93 H562"/><path class="arrow" d="M697 93 H727"/>
+          <path class="arrow dash" d="M790 140 C 790 185, 85 185, 85 140"/><text class="hand" x="430" y="180" text-anchor="middle" font-size="15">…and round again</text>
+        </g>
+      </svg>
+      <figcaption>The same code runs for you alone, and for every player in a shared world.</figcaption>
+    </figure>
+  </section>
+
+  <section id="people" class="reveal">
+    <h2>People <small>who they are decides what they do</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <div class="grid">
+      <div class="card"><span class="ic">🎭</span><h3>Traits</h3><p>Two or three each: ambitious, kind, wrathful, pious, deceitful… They shift every choice below, and colour how the character speaks.</p></div>
+      <div class="card"><span class="ic">💞</span><h3>Regard</h3><p>How each person feels about <i>each other</i> person, from sworn enemy to devoted. Family starts warm. Quarrels, friendships and sins move it.</p></div>
+      <div class="card"><span class="ic">🙂</span><h3>Opinion of you</h3><p>What they think of <i>you</i>, built from gifts, promises, insults, your prestige, the company you keep, and what they know about your deeds.</p></div>
+      <div class="card"><span class="ic">🧠</span><h3>Memory</h3><p>What you say and do is written to a FalkorDB memory graph. The next conversation, or the next ruler, remembers it.</p></div>
+    </div>
+    <p class="note">Nobody is "the villain". An ambitious second son with a cruel streak and a king past sixty is a story waiting to be told.</p>
+  </section>
+
+  <section id="schemes" class="reveal">
+    <h2>Schemes <small>drives become plans</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <p>Each season, every adult weighs what they want against what they are. Grudge, jealousy, an heir's patience, greed, desire. Sometimes the answer is a plan. You, your courtiers and foreign rulers all use the <b>same rules</b>.</p>
+    <figure>
+      <svg viewBox="0 0 860 330" role="img" aria-label="The life of a scheme">
+        <rect class="box" x="10" y="20" width="160" height="70" rx="10"/><text x="90" y="50" text-anchor="middle" font-size="18">A drive</text><text class="hand" x="90" y="72" text-anchor="middle" font-size="14">grudge · ambition · lust</text>
+        <rect class="box gold" x="215" y="20" width="160" height="70" rx="10"/><text x="295" y="50" text-anchor="middle" font-size="18">A scheme</text><text class="hand" x="295" y="72" text-anchor="middle" font-size="14">owner, target, backers</text>
+        <rect class="box" x="420" y="20" width="160" height="70" rx="10"/><text x="500" y="50" text-anchor="middle" font-size="18">Progress</text><text class="hand" x="500" y="72" text-anchor="middle" font-size="14">cleverness, gold, friends</text>
+        <rect class="box red" x="625" y="20" width="220" height="70" rx="10"/><text x="735" y="50" text-anchor="middle" font-size="18">The blow</text><text class="hand" x="735" y="72" text-anchor="middle" font-size="14">odds: their strength vs. the guard</text>
+        <path class="arrow" d="M172 55 H212"/><path class="arrow" d="M377 55 H417"/><path class="arrow" d="M582 55 H622"/>
+        <rect class="box blue" x="215" y="170" width="200" height="74" rx="10"/><text x="315" y="200" text-anchor="middle" font-size="18">Found out</text><text class="hand" x="315" y="222" text-anchor="middle" font-size="14">spymaster · leak · warning · sweep</text>
+        <path class="arrow dash" d="M360 92 C 360 120, 330 140, 320 168"/><text class="hand" x="395" y="140" font-size="14">every season</text>
+        <rect class="box green" x="520" y="170" width="150" height="74" rx="10"/><text x="595" y="200" text-anchor="middle" font-size="18">Success</text><text class="hand" x="595" y="222" text-anchor="middle" font-size="14">a death, a throne, a lover</text>
+        <rect class="box red" x="700" y="170" width="150" height="74" rx="10"/><text x="775" y="200" text-anchor="middle" font-size="18">Caught</text><text class="hand" x="775" y="222" text-anchor="middle" font-size="14">prison, exile, the block</text>
+        <path class="arrow" d="M700 92 C 640 130, 620 150, 600 168"/><path class="arrow" d="M760 92 C 770 130, 775 150, 775 168"/>
+        <rect class="box" x="520" y="272" width="330" height="44" rx="10"/><text x="685" y="300" text-anchor="middle" font-size="17">…and either way, a secret is left behind</text>
+        <path class="arrow" d="M595 246 C 600 258, 620 262, 640 270"/><path class="arrow" d="M775 246 C 775 258, 760 262, 745 270"/>
+      </svg>
+      <figcaption>Found out early, a plot is dead. Found out late, it is a story.</figcaption>
+    </figure>
+    <table>
+      <tr><th>Scheme</th><th>What it does</th><th>What goes wrong</th></tr>
+      <tr><td>🗡 Murder</td><td>A fatal accident. Slow; backers help.</td><td>Kin, spouses and rulers make it kinslaying or regicide.</td></tr>
+      <tr><td>⚔ Coup</td><td>Seize a throne with friends at your back. Rulers fall, flee or die.</td><td>Crushed coups end in prison or the block; the loser may come back as an exile with a claim.</td></tr>
+      <tr><td>🐍 Smear</td><td>Ruin a name: a real secret if you hold one, an invented one if not.</td><td>A lie can be traced to its author, who becomes the slanderer.</td></tr>
+      <tr><td>💘 Seduce</td><td>A lover, or a spouse. Marriage vows and kin make it a secret.</td><td>Affairs leak. Children of affairs are born illegitimate.</td></tr>
+      <tr><td>💰 Embezzle</td><td>A steward skims the treasury every season.</td><td>The books are audited. Eventually.</td></tr>
+      <tr><td>📜 Forge a claim</td><td>Fake papers: a reason to invade.</td><td>If the ink is checked mid-war, the shame is yours and the war score drops.</td></tr>
+    </table>
+    <p>You run these from the 🗝 Intrigue window, or from any character's page. You can do the deed yourself or send an agent: a spymaster takes the fall instead of you, <i>if</i> they keep quiet.</p>
+  </section>
+
+  <section id="secrets" class="reveal">
+    <h2>Secrets <small>everything leaves a trace</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <p>Plots, crimes, affairs, forged papers and bastards all leave a <b>secret</b>: a fact, true or false, and a list of who knows it. Your dossier holds the ones <i>you</i> know.</p>
+    <div class="two">
+      <div>
+        <h3>How secrets move</h3>
+        <ol class="steps">
+          <li><b>Whispers.</b> People tell their friends. Gossips tell more.</li>
+          <li><b>Conscience.</b> The pious and honest struggle to keep a grave secret.</li>
+          <li><b>Spite.</b> An enemy of the guilty may simply tell everyone.</li>
+          <li><b>Crowds.</b> Five people know? It is out by Tuesday.</li>
+        </ol>
+      </div>
+      <div>
+        <h3>What you can do with one</h3>
+        <ol class="steps">
+          <li><b>Expose it.</b> It becomes public; the guilty carry the mark.</li>
+          <li><b>Blackmail.</b> Gold, once or twice. The proud hit back.</li>
+          <li><b>Verify it.</b> Rumours may be lies. Spreading a false one backfires.</li>
+          <li><b>Keep it.</b> A secret in hand is leverage later.</li>
+        </ol>
+      </div>
+    </div>
+    <h3>Getting information</h3>
+    <div class="grid">
+      <div class="card"><span class="ic">🧙</span><h3>Your spymaster</h3><p>Hears things by himself. A sharper one hears more. Ask for a <b>sweep</b> when you are worried.</p></div>
+      <div class="card"><span class="ic">🕵</span><h3>Spies</h3><p>Place them in other courts. They report secrets and news. They can be caught, and foreign spies sit in yours.</p></div>
+      <div class="card"><span class="ic">🗣</span><h3>Gossip</h3><p>Ask someone what they know. Friends talk. The deceitful may invent. Friends also <i>warn</i> you unprompted.</p></div>
+      <div class="card"><span class="ic">⛓</span><h3>Prisoners</h3><p>An arrested plotter can be questioned: secrets, and the names of the helpers.</p></div>
+    </div>
+  </section>
+
+  <section id="sins" class="reveal">
+    <h2>Sins &amp; a good name <small>public deeds stick</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <p>While a deed is secret nothing happens. When it comes out, the doer gets a <b>mark</b>. Everyone who knew them thinks less of them, the victim's kin never forgive, and a ruler's throne gets shakier. If the doer is <i>you</i>, every ruler's opinion of you drops, for as long as you carry it. The pious mind most. The cynical and ambitious barely blink.</p>
+    <p>
+      <span class="pill">🗡 Murderer</span><span class="pill">🩸 Kinslayer</span><span class="pill">🩸 Regicide</span><span class="pill">🕯 Incestuous</span><span class="pill">💔 Adulterer</span><span class="pill">📜 Forger</span><span class="pill">🐍 Slanderer</span><span class="pill">💰 Thief</span><span class="pill">⛓ Traitor</span>
+    </p>
+    <p class="note">A mark can be paid off with penance: gold, a priest, a barefoot walk. It fades the stain, not the memory.</p>
+  </section>
+
+  <section id="war" class="reveal">
+    <h2>War <small>every war has a reason</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <div class="grid">
+      <div class="card"><span class="ic">⚔</span><h3>Conquest</h3><p>Land, plain and simple.</p></div>
+      <div class="card"><span class="ic">☩</span><h3>Holy war</h3><p>Against a neighbour of another faith. The pious cheer and co-believers may march with you.</p></div>
+      <div class="card"><span class="ic">👑</span><h3>A claim</h3><p>Real or forged. A won claim carries a second province. A forged one can be exposed.</p></div>
+      <div class="card"><span class="ic">🚪</span><h3>Restoration</h3><p>Shelter a deposed ruler, then put them back on their throne. They will owe you everything.</p></div>
+    </div>
+    <p><b>Grand wars.</b> When a war starts, each side's allies decide whether to join. Their armies add to the battle and bleed with it. Hold an alliance with someone on the far side and you will be asked to pick.</p>
+    <p>You fight one battle a season and choose the tactic. Take the score to ±100 to win or lose the province. Peace is possible any time, on terms the score allows.</p>
+  </section>
+
+  <section id="fall" class="reveal">
+    <h2>Rise &amp; fall <small>nothing stays the same size</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <figure>
+      <svg viewBox="0 0 860 150" role="img" aria-label="How unrest builds">
+        <rect class="box" x="10" y="35" width="170" height="70" rx="10"/><text x="95" y="65" text-anchor="middle" font-size="18">Bad seasons</text><text class="hand" x="95" y="87" text-anchor="middle" font-size="14">war, losses, tyranny, sins</text>
+        <rect class="box gold" x="230" y="35" width="150" height="70" rx="10"/><text x="305" y="65" text-anchor="middle" font-size="18">Unrest</text><text class="hand" x="305" y="87" text-anchor="middle" font-size="14">builds, then ebbs</text>
+        <rect class="box red" x="430" y="10" width="180" height="56" rx="10"/><text x="520" y="34" text-anchor="middle" font-size="17">Coups come easier</text><text class="hand" x="520" y="54" text-anchor="middle" font-size="13">a plot needs friends and a reason</text>
+        <rect class="box red" x="430" y="80" width="180" height="56" rx="10"/><text x="520" y="104" text-anchor="middle" font-size="17">A revolt</text><text class="hand" x="520" y="124" text-anchor="middle" font-size="13">a rebel takes a region</text>
+        <rect class="box green" x="660" y="35" width="190" height="70" rx="10"/><text x="755" y="65" text-anchor="middle" font-size="18">A new realm</text><text class="hand" x="755" y="87" text-anchor="middle" font-size="14">or a crushed rebel</text>
+        <path class="arrow" d="M182 70 H227"/><path class="arrow" d="M382 60 C 405 45, 410 40, 428 38"/><path class="arrow" d="M382 80 C 405 95, 410 100, 428 108"/><path class="arrow" d="M612 108 C 640 100, 650 90, 658 80"/>
+      </svg>
+      <figcaption>Realms split, rebels win thrones, exiles come home with armies.</figcaption>
+    </figure>
+    <p>Conquered realms fall off the map. Rebel realms are born onto it. Your own people can do it to you: starve them, tax them to the bone, execute too freely, and a revolt arrives. You can listen, buy them off, or send the army. If you lose, a piece of your kingdom leaves.</p>
+  </section>
+
+  <section id="talk" class="reveal">
+    <h2>Talking <small>words, or buttons. Your choice</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <p>Every action in the game is a button. Talking to someone is an <i>additional</i> way to do the same things, with a living character in the room.</p>
+    <figure>
+      <svg viewBox="0 0 860 200" role="img" aria-label="How a conversation works">
+        <rect class="box" x="10" y="60" width="150" height="80" rx="10"/><text x="85" y="95" text-anchor="middle" font-size="18">The engine</text><text class="hand" x="85" y="117" text-anchor="middle" font-size="14">decides what they WILL do</text>
+        <rect class="box gold" x="210" y="60" width="150" height="80" rx="10"/><text x="285" y="95" text-anchor="middle" font-size="18">Fate</text><text class="hand" x="285" y="117" text-anchor="middle" font-size="14">"will lend 60. Will refuse an ally."</text>
+        <rect class="box blue" x="410" y="60" width="150" height="80" rx="10"/><text x="485" y="95" text-anchor="middle" font-size="18">The character</text><text class="hand" x="485" y="117" text-anchor="middle" font-size="14">an LLM: voice, wit, memory</text>
+        <rect class="box green" x="610" y="60" width="240" height="80" rx="10"/><text x="730" y="95" text-anchor="middle" font-size="18">Checked outcome</text><text class="hand" x="730" y="117" text-anchor="middle" font-size="14">only what fate allows takes effect</text>
+        <path class="arrow" d="M162 100 H207"/><path class="arrow" d="M362 100 H407"/><path class="arrow" d="M562 100 H607"/>
+        <text class="hand" x="485" y="40" text-anchor="middle" font-size="15">+ what the memory graph holds of you</text><path class="arrow dash" d="M485 46 V 56"/>
+        <text class="hand" x="430" y="180" text-anchor="middle" font-size="15">The AI can talk anyone into a mood, but it cannot invent a loan or a murder the engine did not allow.</text>
+      </svg>
+    </figure>
+    <p>In conversation you can: ask for gold, make a promise, pay in person, ask for a secret, ask someone to join your council or your plot, confront a suspect, or quietly ask your spymaster to arrange a death. Characters keep their own secrets. A plotter will deny it to your face unless you hold proof, or they are the sort to crack.</p>
+  </section>
+
+  <section id="world" class="reveal">
+    <h2>Shared worlds <small>one world, many rulers</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <div class="grid">
+      <div class="card"><span class="ic">⏳</span><h3>A real-time clock</h3><p>Seasons turn by themselves. Alone and reading a popup, the sand runs three times slower.</p></div>
+      <div class="card"><span class="ic">🗣</span><h3>Stand-ins</h3><p>Step away and a steward speaks for you, guided by what you told it.</p></div>
+      <div class="card"><span class="ic">🔒</span><h3>Private knowledge</h3><p>You are only ever told the plots and secrets you have found. Other players cannot be targets of your schemes: write them a letter.</p></div>
+      <div class="card"><span class="ic">📜</span><h3>Tales from afar</h3><p>Big deeds are written to shared memory. Other players hear of them as gossip.</p></div>
+    </div>
+  </section>
+
+  <section class="reveal">
+    <h2>A few tips <small>for a first reign</small></h2>
+    <svg class="swash" viewBox="0 0 190 10"><path d="M2 6 C40 1, 80 9, 120 4 S 170 6, 188 3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" filter="url(#rough2)"/></svg>
+    <ul>
+      <li>Appoint a spymaster who is good at it. It is the cheapest defence there is.</li>
+      <li>Be kind to people who might warn you. They do.</li>
+      <li>A younger child named as heir makes a loyal friend and a dangerous brother.</li>
+      <li>If you must have someone killed, do it through an agent, and hope they are loyal.</li>
+      <li>Check a rumour before you spread it.</li>
+    </ul>
+    <p style="text-align:center"><a class="btn play" href="/">▶ Back to the game</a></p>
+  </section>
+  <footer>Royal Ramble · memory in a FalkorDB graph · every ruler remembers what you did</footer>
+</div>
+<script>
+  const io = new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); } }), { threshold: 0.08 });
+  document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+</script>
+</body>
+</html>

@@ -1,0 +1,1081 @@
+// Game controller: owns the state, the map view, the HUD and the character panel; runs turns and
+// flushes the memory outbox to the server (→ FalkorDB graph).
+import {
+  createWorld, player, playerRealm, provincesOf, fullName, shortName, roleLabel, opinionOf, ageOf, TRAITS, council, income, maxLevies,
+  atWar, allied, neighborsOfRealm, dateStr, SEASONS, COUNCIL, livingCourt, applyProvNames,
+  TAX, taxOf, OMENS, omensOf, incomeParts, moodParts, moodTier, prestigeTier, prestigeOpinion, relationshipsOf,
+} from '../shared/world.js';
+import { PRESETS } from '../shared/cultures.js';
+import { generateMap } from '../shared/mapgen.js';
+import { endSeason, reputation } from '../shared/sim.js';
+import { canTalk, ACTIONS, marriageablesOfMine, marriageBlock, marriageChance, keepCost, warBlock, executeBlock, allianceNeed, allianceLeverage } from '../shared/actions.js';
+import { resolveEvent } from '../shared/events.js';
+import { MapView } from './map/MapView.js';
+import { stillURL, moodExpr, liveActor } from './portraits.js';
+import { api, playerId } from './api.js';
+import { h, $, esc, toast, opinionBadge, tipHTML, floatDelta, setLinkifier, typingDots } from './ui/dom.js';
+import { draggable, resetPositions } from './ui/drag.js';
+import { confirmBox, chooseBox } from './ui/dialog.js';
+import { linkify, relationOf } from './ui/links.js';
+import { openWar, warBar, warsOf, scoreFor } from './ui/war.js';
+import { openAdvisor } from './ui/advisor.js';
+import { showEvent } from './ui/eventModal.js';
+import { openAudience, sexMark } from './ui/audience.js';
+import { openChat } from './ui/chat.js';
+import { music, musicForPreset, sfx, unlock, installClickSounds } from './audio.js';
+import { openChronicle } from './ui/chronicle.js';
+import { openContinue } from './ui/continue.js';
+import { openIntrigue, schemeBox } from './ui/intrigue.js';
+import { holyBlock, claimsFor } from '../shared/warplay.js';
+import { SINS, heirOf } from '../shared/world.js';
+import { installSketch } from './ui/sketch.js';
+import { armsEl } from './ui/heraldry.js';
+import { openSetup } from './ui/setup.js';
+import { runTutorial } from './ui/tutorial.js';
+import { applyOptions, openOptions, getOpt, setOpt } from './ui/options.js';
+import { openLobby, pickRealm } from './ui/lobby.js';
+
+const CROWN_SVG = '<svg class="crown" viewBox="0 0 70 44"><g fill="#d4ac34" stroke="#2a1d10" stroke-width="2" stroke-linejoin="round" filter="url(#rough2)"><path d="M6 38 L4 10 L20 24 L35 4 L50 24 L66 10 L64 38 Z"/><path d="M6 38 H64 V43 H6Z" fill="#a8302a"/></g><g fill="#f1e8d0" stroke="#2a1d10" stroke-width="1.4"><circle cx="4" cy="9" r="3"/><circle cx="35" cy="4" r="3.4"/><circle cx="66" cy="9" r="3"/></g></svg>';
+
+export const name = 'Royal Ramble';
+
+export class Game {
+  constructor() {
+    this.name = name;
+    this.state = null; this.map = null; this.view = null; this.selected = null; this.busy = false; this.modal = false;
+    this.mp = null; // { id, v, meta, skew } when playing in a shared world
+  }
+
+  // ------------------------------------------------------------ boot & campaigns
+  async boot() {
+    installSketch();
+    applyOptions();
+    installClickSounds();
+    document.body.append(h('div#vignette'));
+    const boot = $('#boot') || document.body.appendChild(h('div#boot'));
+    const status = h('div.boot-status', null, typingDots(), ' Unrolling the map…');
+    boot.innerHTML = '';
+    boot.removeAttribute('style');
+    boot.className = 'modal-back';
+    boot.append(h('div.panel.title-screen.boot-card', null, ['tl', 'tr', 'bl', 'br'].map(c => h('i.corner.' + c)), h('h1', { html: CROWN_SVG + name }), status));
+    this.backdrop();
+    let profile = null, health = null;
+    try { [profile, health] = await Promise.all([api.profile(), api.health()]); } catch (e) { console.warn(e); }
+    // browsers only allow sound after a click, so the first click both starts the music and the game
+    await new Promise(go => {
+      status.replaceWith(h('button.btn.dark.boot-go', { onclick: go }, 'Click to begin'));
+      boot.addEventListener('pointerdown', e => { if (e.target === boot) go(); });
+      document.addEventListener('keydown', function k(e) { if (e.key === 'Enter' || e.key === ' ') { document.removeEventListener('keydown', k); go(); } });
+    });
+    unlock();
+    boot.remove();
+    this.profile = profile || { campaigns: [] };
+    // a copy of the solo save lives in the browser too, in case the server's disk was wiped
+    try { const local = JSON.parse(localStorage.getItem('rb-save') || 'null'); if (local && (!this.profile.save || (local.turn > (this.profile.save.turn || 0) && local.seed === this.profile.save.seed) || local.seed !== this.profile.save.seed && !this.profile.save)) this.profile.save = local; } catch {}
+    this.health = health;
+    // older saves had one slot: give it a name so it joins the list
+    const p = this.profile; p.saves = p.saves || {};
+    if (p.save && !p.save.slot) p.save.slot = 'g-' + (p.save.seed || 'old') + '-' + (p.save.campaign || 1);
+    if (p.save && !p.saves[p.save.slot]) p.saves[p.save.slot] = p.save;
+    this.titleScreen();
+  }
+
+  /** A drifting map of some random world behind the title screen. */
+  backdrop() {
+    const ids = Object.keys(PRESETS);
+    const preset = ids[Math.floor(Math.random() * ids.length)];
+    const seed = 'title' + Math.floor(Math.random() * 1e6);
+    const { state, map } = createWorld(seed, { preset });
+    state.playerRealm = -1;
+    this.titleWorld = { state, map };
+    this.map = map;
+    if (!this.view) this.view = new MapView($('#map'), map, () => (this.state || (this.titleWorld && this.titleWorld.state)), {
+      onClick: p => this.state && this.clickProvince(p),
+      onHover: (p, e) => this.state && this.hoverProvince(p, e),
+      onHoverMove: e => this.moveHover(e),
+    });
+    else this.view.setMap(map);
+    this.view.view.z = this.view.minZ * 1.5;
+    this.view.startDrift();
+  }
+
+  toTitle() {
+    this.saveNow();
+    this.leaveMp();
+    this.state = null; this.selected = null; this.audience = null; document.body.classList.remove('aud-open');
+    $('#hud').innerHTML = '';
+    document.querySelectorAll('.modal-back').forEach(e => e.remove());
+    this.backdrop();
+    this.titleScreen();
+  }
+
+  titleScreen() {
+    music('title');
+    const saves = Object.values(this.profile.saves || {}).filter(x => x && !x.gameOver).sort((a, b) => (b.lastPlayed || 0) - (a.lastPlayed || 0));
+    const save = saves[0] || this.profile.save;
+    const past = (this.profile.campaigns || []).slice(-4).reverse();
+    const mem = this.health && this.health.memory && this.health.memory.enabled;
+    const back = h('div.modal-back.clear', null, h('div.panel.title-screen', null,
+      ['tl', 'tr', 'bl', 'br'].map(c => h('i.corner.' + c)),
+      h('h1', { html: CROWN_SVG + name }),
+      h('div.tag', null, 'Make promises. Break them. See who remembers.'),
+      h('hr.orn'),
+      h('p', null, 'Every character remembers what you say.', mem ? null : h('span.muted', null, ' (Memory is offline right now.)')),
+      h('div.stack', null,
+        saves.length ? h('button.btn.dark', { onclick: () => { back.remove(); openContinue(this, () => this.titleScreen()); }, 'data-tip': tipHTML('Continue', `${saves.length} game${saves.length === 1 ? '' : 's'} on the go.`) }, `▶ Continue${saves.length > 1 ? ' (' + saves.length + ' games)' : ''}`) : null,
+        h('button.btn' + (saves.length ? '' : '.dark'), { onclick: () => { back.remove(); this.newCampaign(() => this.titleScreen()); } }, saves.length ? '📜 Start another game' : '👑 Begin your reign'),
+        h('button.btn', { onclick: () => { back.remove(); openLobby(this, () => this.titleScreen()); } }, '🌍 Shared worlds (multiplayer)'),
+        h('button.btn', { onclick: () => window.open('/about.html', '_blank'), 'data-tip': tipHTML('How it works', 'Schemes, secrets, wars and conversation, drawn out. Opens a page.') }, '📖 How it works'),
+        h('button.btn', { onclick: () => openOptions(this) }, '⚙ Options'),
+      ),
+    ));
+    document.body.append(back);
+  }
+
+  newCampaign(onCancel) {
+    // only a finished reign offers "same world, a generation later"; otherwise this is a fresh game alongside the others
+    const prev = this.profile.save && this.profile.save.gameOver ? this.profile.save : null;
+    openSetup(this, { prev, onCancel, onStart: ({ state, map }) => this.beginCampaign(state, map, prev) });
+  }
+
+  beginCampaign(state, map, prev) {
+    const campaign = state.campaign;
+    if (campaign > 1 && prev && prev.seed === state.seed) {
+      state.reigns[0].note = 'restoration';
+      state.outbox.push({ scope: 'dyn', text: `[${dateStr(state)}, campaign ${campaign}] [campaign] A new chapter: ${prev ? 'a generation after the fall of the previous ruler, ' : ''}${fullName(state, player(state))} of House ${state.dynasty} now rules ${playerRealm(state).name}. Old families still tell stories of earlier rulers.`, kind: 'campaign', date: dateStr(state), campaign, ruler: { name: shortName(state, player(state)), house: state.dynasty } });
+    }
+    this.map = map;
+    this.start(state);
+    this.saveNow();
+  }
+
+  // ------------------------------------------------------------ shared worlds
+  async enterWorld(id) {
+    let r;
+    try { r = await api.worldView(id); } catch (e) { toast(e.message, '✖'); return this.titleScreen(); }
+    document.querySelectorAll('.modal-back').forEach(e => e.remove());
+    this.mp = { id, v: r.meta.version, meta: r.meta, skew: Date.now() - r.meta.now, inbox: +(localStorage.getItem('rb-inbox-' + id) || 0) };
+    this.map = this.map && this.map.seed === r.state.seed ? this.map : generateMap(r.state.seed);
+    applyProvNames(this.map, r.state);
+    this.start(r.state);
+    this.toastInbox(!!r.meta.away);
+    this.onMeta(r.meta);
+    if (!r.meta.away && r.state.chronicle.length) this.showRecap(r.state.chronicle.slice(-8), 0, `Back in ${r.meta.name}`);
+    clearInterval(this.poll);
+    this.poll = setInterval(() => this.sync(), 2500);
+    clearInterval(this.clock);
+    this.clock = setInterval(() => this.renderClock(), 1000);
+  }
+  leaveMp() { clearInterval(this.poll); clearInterval(this.clock); this.mp = null; this.pending = null; for (const c of Object.values(this.chats || {})) c.close(); this.chats = {}; }
+
+  /** Things the server tells every sync: someone came to talk, or you were away a long time. */
+  onMeta(meta) {
+    if (!this.mp || !meta) return;
+    this.watchRoster(meta);
+    this.chats = this.chats || {};
+    for (const ch of meta.chats || []) {
+      if (this.chats[ch.id] || !ch.incoming) continue;
+      // don't snatch the keyboard from someone mid-sentence: knock, and open once they finish
+      if (this.isWriting()) { if (this.knocked !== ch.id) { this.knocked = ch.id; toast(`${ch.from} has come to speak with you…`, '💬'); } continue; }
+      this.knocked = null;
+      this.enterChat(ch.id);
+    }
+    if (meta.away && !this.awaySeen) {
+      this.awaySeen = true;
+      const a = meta.away, from = a.y * 4 + a.s;
+      const entries = this.state.chronicle.filter(e => e.y * 4 + e.s >= from);
+      api.worldAct(this.mp.id, 'seenAway', []).catch(() => {});
+      this.showRecap(entries, a.ms);
+    }
+  }
+  /** Toasts (and a blink on the Players panel) when real people join, leave, arrive or step away. */
+  watchRoster(meta) {
+    const now = {};
+    for (const p of meta.players || []) now[p.realm] = { name: p.name, online: p.online, me: p.me };
+    const was = this.mp.roster;
+    this.mp.roster = now;
+    if (!was) return;
+    let ping = false;
+    for (const [rid, p] of Object.entries(now)) {
+      if (p.me) continue;
+      const q = was[rid];
+      if (!q) { toast(`${p.name} has joined the world!`, '👑', 6000); ping = true; }
+      else if (!q.online && p.online) { toast(`${p.name} is online.`, '🟢'); ping = true; }
+      else if (q.online && !p.online) { toast(`${p.name} has gone away.`, '💤'); ping = true; }
+    }
+    for (const [rid, q] of Object.entries(was)) if (!q.me && !now[rid]) { toast(`${q.name} has left the world.`, '🚪', 6000); ping = true; }
+    if (ping) { sfx('bell'); const pl = $('#players'); if (pl) { pl.classList.remove('ping'); void pl.offsetWidth; pl.classList.add('ping'); } }
+  }
+  async enterChat(id, chat) {
+    this.chats = this.chats || {};
+    if (this.chats[id]) return;
+    this.chats[id] = { close() {} };
+    try {
+      const c = chat || await api.chatGet(id, 0);
+      if (!c.open) { delete this.chats[id]; return; }
+      this.chatting = (this.chatting || 0) + 1;
+      this.chats[id] = openChat(this, c, () => { this.chatting--; setTimeout(() => { delete this.chats[id]; }, 4000); this.sync(); this.processQueue(); });
+    } catch (e) { delete this.chats[id]; }
+  }
+  /** Talk to another player's ruler: face to face if they are online, else their steward (if allowed). */
+  async talkToPlayer(c) {
+    try { const chat = await api.chatStart(this.mp.id, c.id); this.enterChat(chat.id, chat); }
+    catch (e) {
+      if (e.status === 409 && this.state.humans[c.realm] && this.state.humans[c.realm].auto) return this.talk(c.id);
+      toast(e.message, '✖');
+    }
+  }
+  /** True while the player is typing somewhere: popups wait until they are done. */
+  isWriting() {
+    const a = document.activeElement;
+    const typing = a && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/checkbox|radio|range|button/.test(a.type))) && !a.disabled && a.value.trim();
+    return !!typing || Date.now() - (this.lastKey || 0) < 3000;
+  }
+  /** Your AI stand-in: may it answer other players and settle matters while you are away? */
+  standInBox() {
+    const cur = this.mp.meta.auto || { on: true, guide: '' };
+    const on = h('input', { type: 'checkbox' });
+    on.checked = cur.on !== false;
+    const ta = h('textarea.field', { maxlength: 600, rows: 5, placeholder: 'e.g. "Be friendly to Ana but never pay tribute. Accept gifts. Avoid wars unless we are clearly stronger. Speak like a grumpy old king."', style: { width: '100%', resize: 'vertical' } });
+    ta.value = cur.guide || '';
+    const back = h('div.modal-back', null, h('div.panel.options', null, h('div.titlebar', null, '🗣 Your stand-in', h('button.x', { onclick: () => back.remove() }, '✕')),
+      h('div.body', null,
+        h('label.row', { style: { gap: '8px', alignItems: 'center', cursor: 'pointer' } }, on, h('b', null, 'Auto replies')),
+        h('p.muted', { style: { fontSize: '13px' } }, 'While you are away (or silent in a chat), a steward speaks for you to other players and settles the matters on your desk, guided by what you write here. Off: other players can only write you letters while you are away.'),
+        ta,
+        h('div.row', { style: { justifyContent: 'flex-end', marginTop: '10px' } },
+          h('button.btn.dark', { onclick: async () => { back.remove(); await this.action('persona', on.checked, ta.value.trim()); this.renderPanel && this.renderPanel(); } }, 'Save')))));
+    document.body.append(back);
+    draggable(back.firstChild, { handle: back.firstChild.querySelector('.titlebar') });
+  }
+  async renameBox() {
+    const s = this.state, pl = player(s);
+    const inp = h('input.field', { maxlength: 24, style: { width: '100%', marginTop: '8px' } });
+    inp.value = pl.name;
+    inp.addEventListener('keydown', e => e.stopPropagation());
+    const ok = await confirmBox({ title: 'Rename your ruler', icon: '✎', ok: 'So be it', cancel: 'Never mind', text: `What shall ${fullName(s, pl)} be called?`, extra: inp });
+    if (ok && inp.value.trim() && inp.value.trim() !== pl.name) await this.action('rename', inp.value.trim());
+  }
+
+  async sync() {
+    if (!this.mp || this.syncing) return;
+    this.syncing = true;
+    try {
+      const r = await api.worldView(this.mp.id, this.mp.v, !!(this.modal || this.audience || this.chatting || this.recapOpen));
+      this.onMeta(r.meta);
+      if (r.same) { this.mp.meta = r.meta; this.renderClock(); }
+      else if (this.modal || this.audience || this.busy) this.pending = r; // apply once the open window closes
+      else this.applyView(r);
+    } catch (e) { if (e.status === 403) { toast(e.message, '✖'); this.toTitle(); } }
+    finally { this.syncing = false; }
+  }
+  applyView(r, noQueue) {
+    if (!this.mp || !r || !r.state) return;
+    const prevOwner = this.state && this.state.owner.join(',');
+    const before = this.state && this.state.turn !== r.state.turn ? this.snapshot() : null;
+    this.mp.v = r.meta.version; this.mp.meta = r.meta; this.mp.skew = Date.now() - r.meta.now;
+    const flags = this.state ? this.state.flags : {};
+    this.state = r.state;
+    this.state.flags = Object.assign(r.state.flags || {}, { mapDirty: false });
+    if (prevOwner !== this.state.owner.join(',') || flags.mapDirty) this.view.invalidate();
+    this.pending = null;
+    this.refresh();
+    if (before) this.ledger(before, this.snapshot());
+    this.toastInbox();
+    if (this.state.gameOver) return this.gameOver();
+    if (!noQueue) this.processQueue();
+  }
+  toastInbox(silent) {
+    const s = this.state, mp = this.mp;
+    if (!mp || !s.inbox) return;
+    // a burst of old news after a long absence is the recap's job, not forty toasts
+    const fresh = s.inbox.filter(n => n.id > mp.inbox);
+    if (fresh.length > 4 && !silent) { silent = true; toast(`${fresh.length} pieces of news. See the Chronicle.`, '📖'); }
+    for (const n of fresh) { if (!silent) toast(n.text, n.icon); mp.inbox = n.id; }
+    try { localStorage.setItem('rb-inbox-' + mp.id, mp.inbox); } catch {}
+  }
+  applyPending() { if (this.pending && !this.modal) this.applyView(this.pending); }
+
+  /** Do something to the world. Single player: run the rule locally. Shared world: ask the server. */
+  /** Remember who you last dealt with (audiences, gifts, ...) for the Chronicle's "Recent" tab. */
+  noteRecent(id, what) {
+    const s = this.state;
+    if (!s || !s.chars || !s.chars[id] || id === player(s).id) return;
+    const key = 'rb-recent:' + s.seed;
+    let list = [];
+    try { list = JSON.parse(localStorage.getItem(key) || '[]'); } catch {}
+    list = [{ id, what, y: s.year, s: s.season, t: s.turn }, ...list.filter(x => x.id !== id)].slice(0, 15);
+    try { localStorage.setItem(key, JSON.stringify(list)); } catch {}
+  }
+  async action(name, ...args) {
+    if (typeof args[0] === 'string' && this.state && this.state.chars && this.state.chars[args[0]] && ['gift', 'imprison', 'release', 'execute', 'banish', 'dismiss', 'keep', 'letter'].includes(name)) this.noteRecent(args[0], name);
+    if (!this.mp) {
+      const res = ACTIONS[name](this.state, this.map, ...args);
+      this.act(res);
+      return res;
+    }
+    try {
+      const r = await api.worldAct(this.mp.id, name, args);
+      this.applyView(r, !!this.modal); // a window is open: its own closing brings the next popup, never on top of it
+      if (name !== 'resolve' && name !== 'audience') this.act(r.res);
+      return r.res;
+    } catch (e) { toast(e.message, '✖'); return { ok: false, msg: e.message }; }
+  }
+  async resolveEvent(item, key) {
+    if (!this.mp) { const msg = resolveEvent(this.state, this.map, item, key); this.flush(); this.save(); return msg; } // saved the moment an event is dealt with
+    const res = await this.action('resolve', item.uid, key);
+    return (res && res.msg) || '';
+  }
+
+  load(state) {
+    if (!this.map || this.map.seed !== state.seed) this.map = generateMap(state.seed);
+    applyProvNames(this.map, state);
+    this.start(state);
+    // back after a long break: "previously, in your reign…"
+    const gap = state.lastPlayed ? Date.now() - state.lastPlayed : 0;
+    if (state.chronicle.length) this.showRecap(state.chronicle.slice(-8), gap, 'Previously, in your reign…');
+  }
+
+  /** A short paragraph of what happened, written by the chronicler (the list itself if the LLM is out). */
+  showRecap(entries, gap, title = 'While you were away') {
+    if (!entries.length || this.recapOpen) return;
+    const s = this.state, texts = entries.map(e => `${SEASONS[e.s]} ${e.y}: ${e.text}`);
+    const pr0 = playerRealm(s), onl = this.mp ? (this.mp.meta.players || []).filter(p => p.online).length : 0, nOpen = s.promises.filter(p => p.status === 'open').length;
+    const status = h('div.recap-status', null, `${fullName(s, player(s))} of ${pr0.name} · ${dateStr(s)} · 💰 ${s.gold} · ⚔ ${pr0.levies}${this.mp ? ` · ${(this.mp.meta.players || []).length} rulers, ${onl} online` : ''}${nOpen ? ` · 🤞 ${nOpen} open promise(s)` : ''}`);
+    const body = h('div.recap-text', null, typingDots(), ' The chronicler clears his throat…');
+    const more = h('details.recap-more', null, h('summary', null, `All ${entries.length} entries`), entries.slice().reverse().map(e => h('div.entry', null, h('span.y', null, `${SEASONS[e.s]} ${e.y}`), this.link(e.text, e.chars))));
+    const close = () => { back.remove(); this.recapOpen = false; if (!this.modal) this.processQueue(); };
+    this.recapOpen = true;
+    const back = h('div.modal-back', { onclick: e => { if (e.target === back) close(); } }, h('div.panel.dialog.recap', null,
+      ['tl', 'tr', 'bl', 'br'].map(k => h('i.corner.' + k)),
+      h('div.titlebar', null, title),
+      h('div.dialog-body', null, h('div.dialog-seal', null, '📜'), h('div', { style: { flex: 1 } }, status, body, more)),
+      h('div.dialog-foot', null, h('button.btn.dark', { onclick: close }, 'Carry on'))));
+    document.body.append(back);
+    sfx('bell');
+    api.recap({ ruler: fullName(s, player(s)), realm: playerRealm(s).name, entries: texts, awayMs: gap })
+      .then(r => { body.innerHTML = ''; body.append(r.text ? this.link(r.text) : h('span.muted', null, 'Little of note.')); })
+      .catch(() => { body.innerHTML = ''; body.append(h('span.muted', null, 'The chronicler has lost his spectacles. Here is the list:')); more.open = true; });
+  }
+
+  start(state) {
+    this.state = state;
+    state.flags = state.flags || {};
+    this.snap = null; this.opSeen = {}; this.chronSeen = null; this.igSeen = null; this.igRedraw = null;
+    setLinkifier((text, ids) => this.link(text, ids));
+    document.getElementById('advisor')?.remove();
+    if (!this.view) {
+      this.view = new MapView($('#map'), this.map, () => this.state, {
+        onClick: p => this.clickProvince(p),
+        onHover: (p, e) => this.hoverProvince(p, e),
+        onHoverMove: e => this.moveHover(e),
+      });
+    } else { this.view.stopDrift(); this.view.setMap(this.map); }
+    this.titleWorld = null;
+    music(musicForPreset(state.preset));
+    const cap = this.map.provinces[playerRealm(state).capital].center;
+    this.view.centerOn(cap[0], cap[1], this.view.minZ * 1.35);
+    this.buildHUD();
+    this.idleWatch();
+    this.refresh();
+    this.flush();
+    setTimeout(() => this.processQueue(), 300);
+    if (state.turn === 0) setTimeout(() => this.welcome(), 400);
+    if (!getOpt('tutorialDone')) setTimeout(() => this.tutorial(), 900);
+  }
+
+  welcome() {
+    const s = this.state, pl = player(s);
+    if (getOpt('tutorialDone')) toast(`You are ${fullName(s, pl)}, ruler of ${playerRealm(s).name}. Click characters to talk. Each season you gain one audience 🔔.`, '👑', 8000);
+  }
+
+  tutorial() {
+    if (this.tut || !this.state) return;
+    const s = this.state, pl = player(s), pr = playerRealm(s);
+    const cn = council(s);
+    const adviser = cn.chancellor || cn.steward || Object.values(cn)[0];
+    const nb = neighborsOfRealm(s, this.map, s.playerRealm)[0];
+    const nbRealm = nb != null ? s.realms[nb] : null;
+    const mapPoint = () => {
+      if (!nbRealm) return null;
+      const [x, y] = this.map.provinces[nbRealm.capital].center;
+      const [sx, sy] = this.view.toScreen(x, y);
+      return { left: sx - 26, top: sy - 26, width: 52, height: 52 };
+    };
+    const steps = [
+      { title: `Hail, ${fullName(s, pl)}!`, text: `You rule ${pr.name}. A quick tour?` },
+      { title: 'This is you', text: 'Your ruler. Click for family, realm and promises.', target: () => $('#ruler-badge') },
+      { title: 'The treasury', text: 'Gold, soldiers, prestige, reputation. Hover for details.', target: () => $('#topbar') },
+      { title: 'The world', text: nbRealm ? `Your neighbour, ${nbRealm.name}. Click a realm to meet its ruler.` : 'Click a realm to meet its ruler.',
+        before: () => { this.closePanel(); if (nbRealm) { const c = this.map.provinces[nbRealm.capital].center; const m = this.map.provinces[pr.capital].center; this.view.centerOn((c[0] + m[0]) / 2, (c[1] + m[1]) / 2); } }, target: mapPoint, pad: 4 },
+      { title: 'Your court', text: 'Your council. Each has opinions of you.', before: () => this.selectChar(pl.id, null, 'court'), target: () => $('#charpanel') },
+      adviser ? { title: 'Talk to anyone', text: `Talk to ${adviser.name}. They will remember it, for years.`, before: () => this.selectChar(adviser.id), target: () => $('#charpanel .actions .btn.dark') || $('#charpanel') } : null,
+      { title: 'Audience bells', text: 'Each talk costs a 🔔. You get one per season.', target: () => $('#endturn .seals'), before: () => this.closePanel() },
+      { title: 'Promises', text: 'Promises you make get deadlines. They will collect.', target: () => $('#menu') },
+      { title: this.mp ? 'The season clock' : 'End the season', text: this.mp ? 'Seasons turn by themselves for everyone. Watch the ring run down.' : 'Time passes. Events, wars, births and deaths happen.', target: () => $('.end-btn') },
+      { title: 'Options', text: 'Settings, and this tour again. Good luck!', target: () => $('#menu .opt-btn') },
+    ].filter(Boolean);
+    this.tut = runTutorial(steps, { onDone: () => { this.tut = null; setOpt('tutorialDone', true); this.closePanel(); const c = this.map.provinces[pr.capital].center; this.view.centerOn(c[0], c[1]); } });
+  }
+
+  // ------------------------------------------------------------ persistence & memory
+  async flush() {
+    const s = this.state;
+    if (!s || !s.outbox.length || this.mp) return;
+    const entries = s.outbox.splice(0);
+    try { await api.remember(entries); } catch (e) { console.warn('memory flush failed', e); s.outbox.unshift(...entries); }
+  }
+  /** Saves are batched: a busy moment (an audience, a run of events) writes the whole state once, not on every click. */
+  save() {
+    if (!this.state || this.mp) return;
+    clearTimeout(this._saveT);
+    if (!this._saveHook) { this._saveHook = true; window.addEventListener('pagehide', () => { if (this._saveT) this.saveNow(); }); }
+    this._saveT = setTimeout(() => this.saveNow(), 1500);
+  }
+  async saveNow() {
+    clearTimeout(this._saveT); this._saveT = 0;
+    const s = this.state;
+    if (!s || this.mp) return;
+    if (!s.slot) s.slot = 'g' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+    const r = s.reigns[0], last = s.reigns[s.reigns.length - 1];
+    const summary = { campaign: s.campaign, dynasty: s.dynasty, realm: playerRealm(s).name, from: r.from, to: s.year, rep: last.rep || reputation(s.stats), rulers: s.reigns.map(x => x.name) };
+    s.lastPlayed = Date.now();
+    try { localStorage.setItem('rb-save', JSON.stringify(s)); } catch {}
+    try { await api.save(s, summary); } catch (e) { console.warn('save failed', e); }
+    this.profile.save = s;
+    (this.profile.saves = this.profile.saves || {})[s.slot] = s;
+  }
+
+  // ------------------------------------------------------------ turns
+  async endTurn() {
+    if (this.audience) { toast('Finish your audience first.', '🔔'); return; }
+    // a window flagged open that is not on screen would block the button for good: clear it
+    if (this.modal && !document.querySelector('.modal-back')) { this.modal = false; this.busy = false; }
+    if (this.mp) {
+      if (this.state.queue.length && !this.modal) return this.processQueue(true);
+      return this.hurrySeason();
+    }
+    if (this.busy || this.modal || this.state.queue.length) {
+      if (this.state.queue.length && !this.modal && !this.busy) this.processQueue(true);
+      else toast(this.state.queue.length ? 'Something needs your decision first.' : 'One moment…', '⏳');
+      return;
+    }
+    this.busy = true;
+    $('.end-btn').disabled = true;
+    sfx('snap');
+    const before = this.snapshot();
+    try {
+      endSeason(this.state, this.map);
+      this.ledger(before, this.snapshot());
+      for (const t of this.state.flags.lastTurnEvents || []) toast(t.text, t.icon);
+      if (this.state.flags.mapDirty) this.view.invalidate();
+      this.refresh();
+      this.flush();
+      this.save();
+      if (this.state.gameOver) return this.gameOver();
+      this.processQueue();
+    } catch (e) {
+      console.error(e);
+      toast('The season stumbled: ' + (e.message || 'unknown error') + '. Press End Season again.', '✖');
+    } finally { this.busy = false; $('.end-btn').disabled = false; }
+  }
+
+  /** `now`: the player pressed the button, so do not wait for them to stop typing. */
+  processQueue(now) {
+    const s = this.state;
+    if (!s || this.modal || !s.queue.length) return;
+    const gap = (this.mp ? 3500 : 300) - (Date.now() - (this.lastEventClose || 0));
+    if (this.chatting || this.recapOpen || (!now && (this.isWriting() || gap > 0))) {
+      clearTimeout(this._qWait);
+      this._qWait = setTimeout(() => this.processQueue(), Math.max(gap, 1200));
+      return;
+    }
+    this.modal = true;
+    showEvent(this, s.queue[0], () => {
+      this.modal = false;
+      this.lastEventClose = Date.now();
+      const st = this.state;
+      if (st.flags.mapDirty) this.view.invalidate();
+      if (this.pending) return this.applyView(this.pending);
+      this.refresh(); this.flush();
+      if (st.gameOver) return this.gameOver();
+      if (st.queue.length) setTimeout(() => this.processQueue(), this.mp ? 3500 : 300);
+      else this.save();
+    });
+  }
+
+  talk(charId, { free = false, reason = '', onClose } = {}) {
+    const s = this.state, c = s.chars[charId];
+    // an event's "Talk" has already closed its window: always hand control back, or the game waits forever
+    if (!canTalk(s, c)) { toast('They cannot speak with you.', '🤐'); onClose && onClose(); return; }
+    if (this.audience) { toast('Finish your current audience first.', '🔔'); onClose && onClose(); return; }
+    if (!free && s.audiences <= 0) { toast('No audience bells left. End the season to get another 🔔.', '🔔'); this.nudgeEnd(); return; }
+    if (!free && !this.mp) { s.audiences--; floatDelta($('#endturn .seals'), '−1 🔔', 'neg', { below: true }); }
+    const wasModal = this.modal;
+    this.modal = true;
+    this.refresh();
+    openAudience(this, c, { reason, free, onClose: said => {
+      this.modal = wasModal;
+      // nothing was said (they could not speak, or you left at once): give the bell back
+      if (!free && !this.mp && !said && s.audiences < 3) { s.audiences++; this.refresh(); }
+      if (this.mp) { this.sync(); onClose && onClose(); return; }
+      this.refresh(); this.flush(); this.save();
+      if (this.view && s.flags.mapDirty) this.view.invalidate();
+      onClose && onClose();
+      if (!wasModal) this.processQueue();
+    } });
+  }
+
+  gameOver() {
+    const s = this.state;
+    if (document.querySelector('.gameover')) return;
+    const back = h('div.modal-back.gameover', null, h('div.panel.title-screen', null,
+      h('h1', null, s.gameOver.reason === 'conquered' ? 'Conquered!' : 'The End'),
+      h('p', null, s.gameOver.reason === 'conquered' ? `${playerRealm(s).name} has fallen. House ${s.dynasty} is driven into exile.` : `The tale of House ${s.dynasty} closes here.`),
+      h('p.muted', null, 'But the world remembers. Start a new campaign and the great houses will still tell stories of what your dynasty did.'),
+      h('div.row', { style: { justifyContent: 'center', gap: '10px' } },
+        h('button.btn', { onclick: () => openChronicle(this) }, 'Read the Chronicle'),
+        this.mp ? h('button.btn.dark', { onclick: () => { back.remove(); const id = this.mp.id; this.leaveMp(); pickRealm(this, id, () => this.toTitle()); } }, 'Claim another realm')
+          : h('button.btn.dark', { onclick: () => { back.remove(); this.profile.save = s; this.newCampaign(); } }, 'Begin a new campaign')),
+    ));
+    document.body.append(back);
+  }
+
+  // ------------------------------------------------------------ map interaction
+  clickProvince(p) {
+    if (p < 0) { this.closePanel(); return; }
+    const r = this.state.realms[this.state.owner[p]];
+    this.selectChar(r.ruler, p);
+  }
+  hoverProvince(p, e) {
+    const el = $('#hoverinfo');
+    if (p < 0) { el.style.display = 'none'; return; }
+    const s = this.state, prov = this.map.provinces[p], r = s.realms[s.owner[p]], ruler = s.chars[r.ruler];
+    const op = r.id === s.playerRealm ? null : opinionOf(s, ruler).total;
+    el.innerHTML = '';
+    el.append(h('div.panel.hover-card', null, armsEl(r),
+      h('b', null, prov.name), h('span.muted', null, ` · ${prov.terrain}`), h('br'),
+      `${r.kind} of ${r.name}`, h('br'),
+      h('span', null, fullName(s, ruler)), op != null ? h('span', null, ' ', opinionBadge(op)) : h('span.muted', null, ' (you)'),
+      r.id === s.playerRealm ? h('div', { style: { color: 'var(--gold-2)', fontFamily: 'var(--hand)' } }, '♛ Your land') : null,
+      atWar(s, r.id, s.playerRealm) ? h('div', { style: { color: 'var(--red)' } }, '⚔ At war with you') : allied(s, r.id, s.playerRealm) ? h('div', { style: { color: 'var(--green)' } }, '🤝 Your ally') : null,
+    ));
+    el.style.display = 'block';
+    this.moveHover(e);
+  }
+  moveHover(e) {
+    const el = $('#hoverinfo');
+    if (!e || el.style.display !== 'block') return;
+    el.style.left = (e.clientX + 18) + 'px'; el.style.top = (e.clientY + 18) + 'px';
+  }
+
+  // ------------------------------------------------------------ HUD
+  buildHUD() {
+    const hud = $('#hud');
+    hud.innerHTML = '';
+    hud.append(
+      h('div#ruler-badge.panel', { onclick: () => this.selectChar(player(this.state).id), 'data-tip': tipHTML('Your ruler', 'Family, realm, wars and promises. Drag to move.') }),
+      h('div#topbar.panel'),
+      h('div#alerts'),
+      h('div#endturn.panel', null,
+        h('div.et-top', null,
+          h('button.round-btn', { onclick: () => openAdvisor(this), 'data-tip': tipHTML('Ask your advisor', '"Who should I attack?" "Find me a match." Click a suggestion to go there.') }, '?'),
+          h('button.round-btn', { onclick: () => this.goHome(), 'data-tip': tipHTML('Go home', 'Fly the map back to your lands.') }, '⌂'),
+          h('button.round-btn', { onclick: () => this.view.fitWorld(), 'data-tip': tipHTML('Zoom out', 'See the whole map at once. (Key: 0)') }, '⤢')),
+        h('div', null, h('div.date.sc', { 'data-tip': tipHTML('The date', 'Each season is one turn.') }), h('div.seals', { 'data-tip': tipHTML('Audience bells', 'Talking to someone costs one 🔔.<br>You get one more each season (up to 3).<br>When an event offers a talk, it is free.') })),
+        h('button.end-btn', { onclick: () => this.endTurn() }, 'End', h('br'), 'Season')),
+      h('div#menu.panel', null,
+        h('button.btn.small', { onclick: () => this.selectChar(player(this.state).id, null, 'court'), 'data-tip': tipHTML('Your court', 'Council and courtiers, and how they feel about you.') }, '👥', h('span.mlbl', null, ' Court')),
+        h('button.btn.small#btn-chron', { onclick: () => openChronicle(this, 'chronicle'), 'data-tip': tipHTML('The chronicle', 'Everything that has happened in your reign.') }, '📖', h('span.mlbl', null, ' Chronicle')),
+        h('button.btn.small#btn-intrigue', { onclick: () => openIntrigue(this), 'data-tip': tipHTML('Intrigue', 'Schemes, secrets, spies, the council, and reasons for war. It lights up when you learn something.') }, '🗝', h('span.mlbl', null, ' Intrigue')),
+        h('button.btn.small#btn-promises', { onclick: () => openChronicle(this, 'promises'), 'data-tip': tipHTML('Promises', 'What you swore, to whom, and when it is due. Keep them early from here.') }, '🤞', h('span.mlbl', null, ' Promises'), h('span.count')),
+        h('button.btn.small', { onclick: () => openChronicle(this, 'tales'), 'data-tip': tipHTML('Tales from afar', 'Stories other players\' dynasties left in the world (the shared world graph).') }, '📜', h('span.mlbl', null, ' Tales')),
+        h('button.btn.small.opt-btn', { onclick: () => openOptions(this), 'data-tip': tipHTML('Options', 'Settings, the tutorial again, the title screen.') }, '⚙'),
+      ),
+      h('div#charpanel.panel'),
+      this.mp ? h('div#players.panel') : null,
+    );
+    draggable($('#ruler-badge'), { key: 'badge' });
+    draggable($('#topbar'), { key: 'topbar' });
+    draggable($('#endturn'), { key: 'endturn' });
+    draggable($('#menu'), { key: 'menu' });
+    draggable($('#charpanel'), { handle: '.titlebar', key: 'charpanel' });
+    if (this.mp) draggable($('#players'), { key: 'players' });
+  }
+
+  // ------------------------------------------------------------ getting around
+  goHome() {
+    const s = this.state, pr = playerRealm(s);
+    const c = this.map.provinces[pr.capital].center;
+    this.view.centerOn(c[0], c[1], Math.max(this.view.view.z, this.view.minZ * 1.35));
+    this.view.flash(provincesOf(s, pr.id), '#f3d77a', 2200);
+  }
+  goToRealm(id) {
+    const r = this.state.realms[id];
+    if (!r) return;
+    const c = this.map.provinces[r.capital].center;
+    this.view.centerOn(c[0], c[1], Math.max(this.view.view.z, this.view.minZ * 1.35));
+    this.view.flash(provincesOf(this.state, id), r.id === this.state.playerRealm ? '#f3d77a' : '#fff0c0', 2200);
+  }
+  goToProvince(p) {
+    const c = this.map.provinces[p].center;
+    this.view.centerOn(c[0], c[1], Math.max(this.view.view.z, this.view.minZ * 1.8));
+    this.view.flash([p], '#e05a3a', 2600);
+  }
+  link(text, ids) { return linkify(this, String(text), ids); }
+
+  // ------------------------------------------------------------ seeing what changed
+  snapshot() {
+    const s = this.state, pr = playerRealm(s);
+    return { turn: s.turn, date: dateStr(s), gold: s.gold, levies: pr.levies, prestige: s.prestige, bells: s.audiences, provs: provincesOf(s, pr.id).length, owner: s.owner.slice(), realm: s.playerRealm, wars: warsOf(s).length, queue: s.queue.length };
+  }
+  /** Float "+40" over whatever changed since the last refresh, and flash land that changed hands. */
+  showDeltas() {
+    const s = this.state, now = this.snapshot(), was = this.snap;
+    this.snap = now;
+    if (!was || was.realm !== now.realm) return;
+    const fl = (sel, d, suffix = '', opt) => { if (d) floatDelta($(sel), (d > 0 ? '+' : '−') + Math.abs(d) + suffix, d > 0 ? 'pos' : 'neg', opt); };
+    fl('#res-gold', now.gold - was.gold, '', { below: true });
+    fl('#res-levies', now.levies - was.levies, '', { below: true });
+    fl('#res-prestige', now.prestige - was.prestige, '', { below: true });
+    if (now.bells > was.bells) fl('#endturn .seals', now.bells - was.bells, ' 🔔', { below: true });
+    if (now.provs !== was.provs) fl('#ruler-badge', now.provs - was.provs, now.provs - was.provs === 1 || now.provs - was.provs === -1 ? ' province' : ' provinces', { below: true });
+    const won = [], lost = [];
+    for (let p = 0; p < now.owner.length; p++) if (now.owner[p] !== was.owner[p]) { if (now.owner[p] === now.realm) won.push(p); else if (was.owner[p] === now.realm) lost.push(p); }
+    if (won.length) { this.view.flash(won, '#f3d77a', 5000); toast(`You now hold ${won.map(p => this.map.provinces[p].name).join(', ')}!`, '👑'); }
+    if (lost.length) { this.view.flash(lost, '#c0392b', 5000); toast(`You lost ${lost.map(p => this.map.provinces[p].name).join(', ')}.`, '🏳'); }
+  }
+  /** A little ledger card by the End Season button: what the season brought. */
+  ledger(a, b) {
+    document.querySelectorAll('.ledger').forEach(e => e.remove());
+    const row = (ic, label, d, tip) => d ? h('div.lg-row', { 'data-tip': tip || null }, h('span.lg-ic', null, ic), h('span.lg-l', null, label), h('span.lg-v.' + (d > 0 ? 'pos' : 'neg'), null, (d > 0 ? '+' : '−') + Math.abs(d))) : null;
+    const rows = [
+      row('💰', 'Gold', b.gold - a.gold, 'Income from your provinces, minus upkeep'),
+      row('⚔', 'Soldiers', b.levies - a.levies, 'Levies refill a little each season'),
+      row('⚜', 'Prestige', b.prestige - a.prestige),
+      row('🔔', 'Audience bells', b.bells - a.bells, 'One more talk this season'),
+      row('🏰', 'Provinces', b.provs - a.provs),
+    ].filter(Boolean);
+    const news = b.queue ? h('div.lg-news', null, `${b.queue} matter${b.queue > 1 ? 's' : ''} for your attention`) : h('div.lg-news.muted', null, 'A quiet season.');
+    const card = h('div.panel.ledger', { onclick: () => card.remove(), 'data-tip': 'Click to dismiss' }, h('div.lg-date', null, b.date), rows, news);
+    document.body.append(card);
+    const et = $('#endturn').getBoundingClientRect();
+    card.style.left = Math.max(8, Math.min(innerWidth - 230, et.left + et.width / 2 - 110)) + 'px';
+    card.style.top = Math.max(8, et.top - card.getBoundingClientRect().height - 34) + 'px';
+    setTimeout(() => card.classList.add('out'), 6500);
+    setTimeout(() => card.remove(), 7200);
+  }
+  /** After a quiet spell with nothing to do, the End Season button breathes to say "press me". */
+  idleWatch() {
+    if (this._idleOn) return;
+    this._idleOn = true;
+    // "0" fits the whole map, for when you get lost zoomed in
+    document.addEventListener('keydown', e => { if (e.key === '0' && !/INPUT|TEXTAREA/.test((e.target || {}).tagName || '') && this.view && this.state) this.view.fitWorld(); });
+    document.addEventListener('keydown', e => { const t = e.target; if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) this.lastKey = Date.now(); }, true);
+    const poke = () => { const b = $('.end-btn'); if (b) b.classList.remove('breathe'); clearTimeout(this._idle); this._idle = setTimeout(() => this.idlePulse(), 12000); };
+    ['pointerdown', 'keydown', 'wheel'].forEach(ev => document.addEventListener(ev, poke, true));
+    poke();
+  }
+  idlePulse() {
+    const b = $('.end-btn');
+    if (!b || !this.state || this.mp || this.modal || this.busy || document.querySelector('.modal-back')) return;
+    b.classList.add('breathe');
+  }
+  nudgeEnd() { const b = $('.end-btn'); if (!b) return; b.classList.remove('nudge'); void b.offsetWidth; b.classList.add('nudge'); }
+
+  // shared worlds run on a real-time clock: the season turns by itself, nobody waits for anybody
+  async hurrySeason() {
+    const m = this.mp.meta;
+    if (!m.canForce) return toast('The season turns by itself when the sand runs out.', '⏳');
+    const alone = m.players.filter(p => p.online).length <= 1;
+    if (alone || await confirmBox({ title: 'Turn the season now?', icon: '🔔', text: 'Everyone moves on at once. Use it when the world feels slow.', ok: 'Ring the bell', cancel: 'Wait' })) await this.action('force');
+  }
+
+  renderClock() {
+    if (!this.mp || !$('#endturn')) return;
+    const m = this.mp.meta;
+    const ms = Math.max(0, m.nextTick + this.mp.skew - Date.now()), left = Math.round(ms / 1000);
+    const btn = $('.end-btn');
+    btn.innerHTML = '';
+    btn.append(h('span.clock-sand', { style: { '--p': Math.min(1, ms / (m.seasonSecs * 1000)) } }), 'Next season', h('small', null, `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}${m.canForce ? ' · click to hurry' : ''}`));
+    btn.classList.toggle('soon', left <= 10);
+    btn.classList.remove('on');
+    btn.setAttribute('data-tip', tipHTML('Seasons turn by themselves', `Every ${m.seasonSecs < 60 ? m.seasonSecs + ' seconds' : m.seasonSecs / 60 + ' min'} the season turns for everyone: gold, soldiers, a new bell, battles, events.${m.canForce ? '<br>Click to ring the bell early.' : ''}`));
+    const pl = $('#players');
+    if (pl) {
+      pl.innerHTML = '';
+      pl.append(h('div.pl-head', null, h('span.sc', null, '👤 Players'), h('button.btn.small', { onclick: () => this.standInBox(), 'data-tip': tipHTML('Your stand-in', 'Auto replies while you are away.') }, '🗣'), m.canForce ? h('button.btn.small', { onclick: () => this.hurrySeason(), 'data-tip': tipHTML('Hurry the season', m.founder ? 'You founded this world, so you may turn the season early.' : 'You are alone here, so you may turn the season early.') }, '⏩ Now') : null));
+      for (const p of m.players) {
+        const r = this.state.realms[p.realm];
+        pl.append(h('div.court-row', { onclick: () => this.selectChar(r.ruler), 'data-tip': tipHTML(p.name + ' (a real player)', (p.online ? 'Online: Talk opens a live chat.' : p.auto ? 'Away: their steward answers for them.' : 'Away, auto replies off: letters only.') + '<br>Click to see their ruler') }, armsEl(r),
+          h('div.who', null, p.name + (p.me ? ' (you)' : ''), h('br'), h('small', null, r.name)), h('span', { style: { color: p.online ? 'var(--green)' : 'var(--ink-3)' } }, p.online ? '●' : '○')));
+      }
+    }
+  }
+
+  refresh() {
+    const s = this.state;
+    if (!s) return;
+    const pl = player(s), pr = playerRealm(s);
+    const badge = $('#ruler-badge');
+    badge.innerHTML = '';
+    badge.append(h('div.medal.lg', null, h('img', { src: stillURL(s, pl, 140) })),
+      h('div', null, h('div.name', null, fullName(s, pl)), h('div.sub', null, `${pr.kind} of ${pr.name} · House ${s.dynasty} · age ${ageOf(s, pl)}`)), armsEl(pr));
+    const inc = income(s);
+    const top = $('#topbar');
+    top.innerHTML = '';
+    const sign = n => (n > 0 ? '+' : '') + n;
+    const mood = s.mood == null ? 60 : s.mood, mparts = moodParts(s);
+    top.append(
+      h('div.res#res-gold', { 'data-tip': `<b>Treasury: ${s.gold} gold</b><br>Each season: <b>${sign(inc)}</b><br>${incomeParts(s).map(p => `${esc(p.label)}: <span class="${p.v > 0 ? 'pos' : 'neg'}">${sign(p.v)}</span>`).join('<br>')}<br><span class="muted">Change taxes in Your Majesty ▸ Realm.</span>` }, h('span.ic', null, '💰'), s.gold, h('small', null, ` ${sign(inc)}`)),
+      h('div.res#res-levies', { 'data-tip': `<b>Levies</b><br>${pr.levies} of ${maxLevies(s, pr.id)} men.<br>Replenish each season. Your marshal's martial skill and your prestige raise the maximum.<br>You can hire mercenaries for 40 gold.` }, h('span.ic', null, '⚔'), pr.levies),
+      h('div.res#res-prestige', { 'data-tip': `<b>Prestige: ${prestigeTier(s.prestige)}</b><br>Fame and glory. Feasts, victories and bridges earn it; humiliations cost it.<br>It makes rulers like you more (<span class="${prestigeOpinion(s) >= 0 ? 'pos' : 'neg'}">${sign(prestigeOpinion(s))}</span> opinion), helps marriages, and raises your army cap.` }, h('span.ic', null, '⚜'), s.prestige),
+      h('div.res#res-mood', { 'data-tip': `<b>The people: ${moodTier(mood)} (${mood}/100)</b><br>Taxes: ${taxOf(s).label}.<br>${mparts.length ? mparts.map(p => `${esc(p.label)}: <span class="${p.v > 0 ? 'pos' : 'neg'}">${sign(p.v)}</span>`).join('<br>') : 'Nothing is bothering them right now.'}<br><span class="muted">Below 25 they riot; above 80 they hold festivals and trade more.</span>` }, h('span.ic', null, mood < 25 ? '😡' : mood < 40 ? '😠' : mood < 65 ? '😐' : mood < 85 ? '🙂' : '😄'), mood),
+      h('div.res', { 'data-tip': `<b>Reputation this reign</b><br>Promises kept: ${s.stats.promisesKept}<br>Promises broken: ${s.stats.promisesBroken}<br>Wars started: ${s.stats.wars}<br>Insults: ${s.stats.insults}<br><i>"${reputation(s.stats)}"</i>` }, h('span.ic', null, '📜'), reputation(s.stats).split(' ').pop()),
+    );
+    $('#endturn .date').textContent = dateStr(s);
+    if (this.mp) this.renderClock();
+    const seals = $('#endturn .seals');
+    seals.innerHTML = '';
+    for (let i = 0; i < 3; i++) seals.append(h('div.seal' + (i < s.audiences ? '' : '.empty'), null, '🔔'));
+    const endBtn = $('.end-btn');
+    if (!this.mp) endBtn.setAttribute('data-tip', tipHTML('End the season', `Three months pass. You collect gold and soldiers, get another 🔔, and events, battles, births and deaths happen.${s.audiences ? '' : '<br><b>You have no bells left</b>, so this is the thing to do.'}`));
+    endBtn.classList.toggle('glow', !this.mp && s.audiences === 0 && !s.queue.length);
+    // a light on the Chronicle when there is news you have not read
+    if (this.chronSeen == null) this.chronSeen = s.chronicle.length;
+    const cb = $('#btn-chron'); if (cb) cb.classList.toggle('unread', s.chronicle.length > this.chronSeen);
+    const ib = $('#btn-intrigue'); if (ib) { if (this.igSeen == null) this.igSeen = (s.flags && s.flags.igNew) || 0; ib.classList.toggle('unread', ((s.flags && s.flags.igNew) || 0) > this.igSeen); }
+    if (this.igRedraw) this.igRedraw();
+    // alerts
+    const al = $('#alerts');
+    al.innerHTML = '';
+    for (const w of warsOf(s)) {
+      const enemy = s.realms[w.attacker === s.playerRealm ? w.defender : w.attacker];
+      const sc = scoreFor(s, w);
+      al.append(h('div.alert-wrap', null, h('div.alert.red', { 'data-tip': `<b>War with ${esc(enemy.name)}</b><br>Over: ${esc(this.map.provinces[w.target].name)}<br>Score: ${sc > 0 ? '+' : ''}${sc} (±100 ends it)<br>Click for the war.`, onclick: () => openWar(this, w.id) }, '⚔'), warBar(sc, { small: true })));
+    }
+    const open = s.promises.filter(p => p.status === 'open'), dueSoon = open.filter(p => p.due - s.turn <= 1);
+    const pb = $('#btn-promises');
+    if (pb) {
+      const cnt = pb.querySelector('.count');
+      cnt.textContent = open.length || '';
+      cnt.classList.toggle('hot', dueSoon.length > 0);
+      pb.classList.toggle('pulse', dueSoon.length > 0);
+    }
+    for (const p of dueSoon) {
+      al.append(h('div.alert.gold', { 'data-tip': `<b>Promise due soon</b><br>To ${esc(s.chars[p.to].name)}: "${esc(p.text)}"`, onclick: () => this.selectChar(p.to) }, '🤞'));
+    }
+    for (const o of omensOf(s)) {
+      const O = OMENS[o.id];
+      al.append(h('div.alert.' + (O.good ? 'gold' : 'red'), { 'data-tip': `<b>${esc(O.label)}</b><br>${esc(O.desc)}<br><span class="muted">${Math.max(1, o.until - s.turn)} season(s) left</span>` }, O.icon));
+    }
+    if (this.selected) this.renderPanel();
+    this.showDeltas();
+  }
+
+  // ------------------------------------------------------------ character panel
+  selectChar(id, prov, tab) {
+    this.selected = id; this.selectedProv = prov; this.tab = tab || (id === player(this.state).id ? this.tab || 'self' : 'char');
+    const c = this.state.chars[id];
+    this.view.select(c && c.alive ? c.realm : null);
+    $('#charpanel').classList.add('open');
+    this.renderPanel();
+  }
+  closePanel() { this.selected = null; $('#charpanel').classList.remove('open'); this.view.select(null); this.dropLive(); }
+  dropLive() { if (this.cpLive) { this.cpLive.stop(); this.cpLive = null; } }
+  /** The panel portrait: alive and glancing about (kept between redraws), or a still. */
+  panelPortrait(c, expr) {
+    const s = this.state;
+    // only one living portrait at a time: the audience has its own, so the side panel shows a still meanwhile
+    if (!c.alive || this.audience || getOpt('livePortraits') === false || !window.PM || !window.PM.Actor) { this.dropLive(); return h('img', { src: stillURL(s, c, 200, expr), style: c.alive ? null : { filter: 'grayscale(1) sepia(.4)' } }); }
+    if (this.cpLive && this.cpLive.id === c.id) { if (this.cpLive.expr !== expr) { this.cpLive.actor.setExpr(expr); this.cpLive.expr = expr; } return this.cpLive.el; }
+    this.dropLive();
+    this.cpLive = Object.assign(liveActor(s, c, 200, expr), { id: c.id, expr });
+    this.cpLive.el.style.width = '100%'; this.cpLive.el.style.display = 'block';
+    return this.cpLive.el;
+  }
+
+  renderPanel() {
+    const s = this.state, c = s.chars[this.selected];
+    const el = $('#charpanel');
+    if (!c) return this.closePanel();
+    const pl = player(s), me = c.id === pl.id;
+    const r = s.realms[c.realm];
+    const op = me ? null : opinionOf(s, c);
+    const body = h('div.body');
+    el.innerHTML = '';
+    el.append(h('div.titlebar', { 'data-tip': 'Drag to move' }, me ? 'Your Majesty' : 'Character', h('button.x', { onclick: () => this.closePanel(), 'data-tip': 'Close' }, '✕')), body);
+
+    const traitEls = c.traits.map(t => h('span.trait', { 'data-tip': `<b>${TRAITS[t].label}</b><br>${esc(TRAITS[t].persona)}${TRAITS[t].op ? `<br>Opinion of you: <span class="${TRAITS[t].op > 0 ? 'pos' : 'neg'}">${TRAITS[t].op > 0 ? '+' : ''}${TRAITS[t].op}</span>` : ''}` }, TRAITS[t].icon + ' ' + TRAITS[t].label));
+    body.append(h('div.cp-head', null,
+      h('div.cp-portrait', null, this.panelPortrait(c, me ? 'neutral' : c.alive ? moodExpr(op.total) : 'neutral'), r ? armsEl(r) : null),
+      h('div', { style: { flex: 1, minWidth: 0 } },
+        h('div.cp-name', null, fullName(s, c), ' ', sexMark(c)),
+        h('div.cp-title', null, c.alive ? roleLabel(s, c) : `Died ${c.died} of ${c.cause}`),
+        s.humans && r && r.ruler === c.id && s.humans[r.id] && !me ? h('div', { style: { color: 'var(--red)', fontFamily: 'var(--hand)' } }, `Played by ${s.humans[r.id].name}${s.humans[r.id].online ? '' : ' (away)'}`) : null,
+        h('div', null, `Age ${c.alive ? ageOf(s, c) : c.died - c.born}`, c.house ? ` · House ${c.house}` : '', c.imprisoned ? ' · ⛓ imprisoned' : ''),
+        !me && c.alive ? h('div.rel-line', null, relationOf(this, c).join(' · ')) : null,
+        this.tagsEl(c),
+        op ? h('div', { style: { marginTop: '6px' } }, 'Opinion of you: ', h('span#cp-op', null, opinionBadge(op.total)),
+          h('div.opbar', { 'data-tip': '<b>Opinion of you</b><br>' + op.parts.filter(p => p.value).map(p => `${esc(p.label)}: <span class="${p.value > 0 ? 'pos' : 'neg'}">${p.value > 0 ? '+' : ''}${p.value}</span>`).join('<br>') }, h('i', { style: { left: (50 + op.total / 2) + '%' } }))) : null,
+      )));
+    body.append(h('div.traits', null, traitEls), h('div.quirk', null, `${c.name} ${c.quirk}.`));
+    body.append(h('div.stats', null,
+      [['dip', '🗣', 'Diplomacy', 'Charm and negotiation.<br><span class="muted">As chancellor: easier alliances and better marriage odds.</span>'],
+        ['mar', '⚔', 'Martial', 'Skill at war.<br><span class="muted">As marshal: a bigger army and better odds in battle.</span>'],
+        ['stw', '💰', 'Stewardship', 'Handling money.<br><span class="muted">As steward: more gold every season.</span>'],
+        ['int', '🗝', 'Intrigue', 'Spycraft and sly dealing.<br><span class="muted">As spymaster: better odds when pressing neighbours for tribute.</span>']]
+        .map(([k, ic, lb, desc]) => h('div.stat', { 'data-tip': `<b>${lb}: ${c.stats[k]}</b> (${c.stats[k] >= 16 ? 'brilliant' : c.stats[k] >= 11 ? 'capable' : c.stats[k] >= 6 ? 'average' : 'poor'})<br>${desc}` }, ic + ' ' + c.stats[k], h('small', null, lb)))));
+
+    if (op) { const was = this.opSeen[c.id]; this.opSeen[c.id] = op.total; if (was != null && was !== op.total) setTimeout(() => floatDelta($('#cp-op'), (op.total > was ? '+' : '−') + Math.abs(op.total - was), op.total > was ? 'pos' : 'neg'), 30); }
+    if (me) return this.renderSelf(body);
+
+    // actions. While an audience is open, anything that would disrupt it is greyed out with the reason.
+    const acts = h('div.actions');
+    const inAud = !!this.audience;
+    const lockTip = tipHTML('In an audience', 'Finish your audience first.');
+    const btn = (cls, attrs, label) => h('button.btn' + cls, inAud ? Object.assign({}, attrs, { onclick: null, disabled: true, 'data-tip': lockTip }) : attrs, label);
+    const plainBtn = (attrs, label) => h('button.btn', inAud ? Object.assign({}, attrs, { onclick: null, disabled: true, 'data-tip': lockTip }) : attrs, label);
+    const hu = s.humans && r && r.ruler === c.id && s.humans[r.id] && !s.humans[r.id].me ? s.humans[r.id] : null;
+    if (hu && c.alive) {
+      acts.append(hu.online
+        ? btn('.dark', { onclick: () => this.talkToPlayer(c), 'data-tip': tipHTML('Talk face to face', `${esc(hu.name)} is online: a chat opens on their screen at once. Free.`) }, '💬 Talk')
+        : hu.auto
+          ? btn('.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': tipHTML('Talk to their steward', `${esc(hu.name)} is away. Their stand-in answers, guided by what they told it. Costs one 🔔.`) }, '🔔 Talk')
+          : h('button.btn', { disabled: true, 'data-tip': tipHTML('Away', `${esc(hu.name)} is away and has auto replies off. Write a letter instead.`) }, '🔔 Talk'));
+    } else if (c.alive && canTalk(s, c)) acts.append(btn('.dark', { onclick: () => this.talk(c.id), disabled: s.audiences <= 0, 'data-tip': s.audiences > 0 ? tipHTML('Talk', `Speak with ${esc(c.name)} in person. Costs one 🔔 (you have ${s.audiences}). They remember what you say, and may walk out.`) : tipHTML('No bells left', 'End the season to get another 🔔.') }, s.audiences > 0 ? '🔔 Talk' : '🔔 No bells'));
+    if (c.alive) {
+      for (const n of this.giftOptions()) acts.append(btn('', { onclick: () => this.action('gift', c.id, n), 'data-tip': tipHTML(`Gift ${n} gold`, 'They will like you more. Greedy people love it.') }, `💰 Gift ${n}`));
+      if (s.gold < 25) acts.append(btn('', { onclick: () => this.action('flowers', c.id), 'data-tip': tipHTML('Wild flowers', 'Free. A small token, once a season per person. Better than nothing.') }, '🌼 Flowers'));
+    }
+    const fam = c.alive ? marriageablesOfMine(s).filter(w => !marriageBlock(s, c, w)) : [];
+    if (fam.length) acts.append(btn('', { onclick: () => this.proposeMarriage(c, fam), 'data-tip': tipHTML('Propose marriage', fam.map(w => `${w.id === pl.id ? 'You' : esc(w.name)}: ${marriageChance(s, c, w)}% chance`).join('<br>') + (c.realm !== s.playerRealm ? '<br>A foreign match warms their ruler.' : '')) }, '💍 Marry'));
+    const human = hu;
+    if (human && c.alive) acts.append(plainBtn({ onclick: () => this.writeLetter(r.id, c), 'data-tip': tipHTML('Write a letter', `To ${esc(human.name)}, the player who rules ${esc(r.name)}.`) }, '✉ Write'));
+    const isRuler = r && r.ruler === c.id && r.id !== s.playerRealm;
+    if (isRuler && c.alive) {
+      const war = atWar(s, r.id, s.playerRealm), isAlly = allied(s, r.id, s.playerRealm);
+      if (war) {
+        acts.append(plainBtn({ onclick: () => openWar(this, war.id), 'data-tip': tipHTML('The war', 'Score, armies, battles, peace.') }, '⚔ View war'));
+        acts.append(btn('', { onclick: () => this.action('peace', war.id), 'data-tip': tipHTML('Offer peace', scoreFor(s, war) >= 60 ? 'You are winning: they will yield the province.' : scoreFor(s, war) >= -20 ? 'A white peace: nobody gains.' : 'You are losing. They will refuse.') }, '🕊 Offer peace'));
+      } else {
+        const o = opinionOf(s, c).total, need = allianceNeed(s);
+        if (isAlly) {
+          acts.append(btn('', { onclick: async () => { if (await confirmBox({ title: 'End the alliance?', icon: '💔', text: `${r.name} will take it badly.`, ok: 'End it', cancel: 'Keep it', danger: true })) this.action('cancelAlliance', r.id); }, 'data-tip': tipHTML('Cancel the alliance', 'Costs a little prestige. Needed before you can attack them.') }, '💔 Cancel alliance'));
+        } else acts.append(btn('', { onclick: () => this.action('alliance', c.id), 'data-tip': tipHTML('Propose an alliance', human ? 'Another player: they decide.' : `They need to like you (${need}+, a good chancellor lowers it). Now: ${o}.${allianceLeverage(s, c).reasons.length ? '<br>But: ' + allianceLeverage(s, c).reasons.join(', ') + ' (that may be enough).' : ''}`) }, '🤝 Alliance'));
+        if (warsOf(s).length && !human) acts.append(btn('', { onclick: () => this.action('aid', r.id), 'data-tip': tipHTML('Ask for soldiers', isAlly ? `Needs their opinion 10+ (now ${o}). They may send some men; they will not love being asked.` : `A non-ally needs opinion 28+ (now ${o}), or to owe you a favour. They may send some men.`) }, '📯 Ask for soldiers'));
+        if (!human && c.alive) acts.append(btn('', { onclick: async () => { if (await confirmBox({ title: 'Give soldiers?', icon: '⚔', text: `Send 100 of your men to ${r.name}? A grand gift: ${c.name} will remember it, and may ally with you or send men back one day.`, ok: 'Send them', cancel: 'Not now' })) this.action('giveTroops', r.id, 100); }, 'data-tip': tipHTML('Gift an army', 'Give 100 soldiers to this realm. A gift they will not forget.') }, '🎁 Give 100 soldiers'));
+        const wb = warBlock(s, this.map, r.id);
+        if (wb) acts.append(h('button.btn', { disabled: true, 'data-tip': tipHTML(isAlly ? 'Allies cannot be attacked' : 'Cannot declare war', esc(wb)) }, '⚔ Declare war'));
+        else acts.append(btn('', { onclick: () => this.declareWar(r), 'data-tip': tipHTML('Declare war', `${r.levies} of theirs against your ${playerRealm(s).levies}. You fight one battle a season.`) }, '⚔ Declare war'));
+        if (!isAlly && !human && neighborsOfRealm(s, this.map, s.playerRealm).includes(r.id)) acts.append(btn('', { onclick: () => this.action('tribute', r.id), 'data-tip': tipHTML('Demand tribute', 'Weaker neighbours may pay up. Strong or proud ones laugh at you. A good spymaster helps. Once per 6 seasons.') }, '🪙 Demand tribute'));
+      }
+    }
+    if (c.alive && c.realm === s.playerRealm && c.id !== pl.id) {
+      if (c.court) acts.append(c.imprisoned ? btn('', { onclick: () => this.action('release', c.id), 'data-tip': tipHTML('Release', 'They will be grateful. Somewhat.') }, '🔓 Release')
+        : btn('', { onclick: async () => { if (await confirmBox({ title: 'To the dungeon?', icon: '⛓', text: `Imprison ${c.name}? They will hate you for years, and the council will fear you.`, ok: 'Imprison', cancel: 'Mercy', danger: true })) this.action('imprison', c.id); }, 'data-tip': tipHTML('Imprison', 'Silence a troublemaker. Everyone notices.') }, '⛓ Imprison'));
+      const eb = executeBlock(s, c);
+      acts.append(eb ? h('button.btn', { disabled: true, 'data-tip': tipHTML('Execute', esc(eb)) }, '🪓 Execute')
+        : btn('', { onclick: async () => { if (await confirmBox({ title: 'Execute?', icon: '🪓', text: `${c.name} will die, their family will never forgive you, and the court will fear you (−4 prestige, people unhappier).`, ok: 'Off with their head', cancel: 'Mercy', danger: true })) this.action('execute', c.id); }, 'data-tip': tipHTML('Execute', 'Final. Their relatives will hate you for generations.') }, '🪓 Execute'));
+      if (c.court && ['chancellor', 'marshal', 'steward', 'spymaster', 'priest', 'banker', 'jester'].includes(c.role)) acts.append(btn('', { onclick: async () => { if (await confirmBox({ title: 'Dismiss?', icon: '📜', text: `Take ${c.name}'s office away? A replacement is found next season.`, ok: 'Dismiss', cancel: 'Keep', danger: true })) this.action('dismiss', c.id); }, 'data-tip': tipHTML('Dismiss', 'Remove them from office. They will resent it.') }, '📜 Dismiss'));
+      acts.append(btn('', { onclick: async () => { if (await confirmBox({ title: 'Banish?', icon: '🚪', text: `Send ${c.name} out of your realm, to a neighbour?`, ok: 'Banish', cancel: 'Stay', danger: true })) this.action('banish', c.id); }, 'data-tip': tipHTML('Banish', 'Out of your court and into a neighbour’s. They will hold a grudge.') }, '🚪 Banish'));
+    }
+    body.append(h('div.section', null, h('h4', null, 'Actions'), acts));
+    const shadows = c.alive ? this.shadowActions(c, btn, hu) : [];
+    if (shadows.length) body.append(h('div.section', null, h('h4', { 'data-tip': tipHTML('In the shadows', 'Scheming, gossip, spies and the council. All of it also works in conversation.') }, 'In the shadows'), h('div.actions', null, shadows)));
+
+    const proms = s.promises.filter(p => p.to === c.id);
+    if (proms.length) body.append(h('div.section', null, h('h4', null, 'Promises you made'), proms.slice(-6).reverse().map(p => this.promiseEl(p))));
+    body.append(this.familyEl(c));
+    body.append(this.relationsEl(c));
+    if (c.log && c.log.length) body.append(h('div.section', null, h('h4', null, 'Lately'), c.log.slice(-4).reverse().map(l => h('div.entry', null, h('span.y', null, l.y), this.link(l.t, [c.id])))));
+    if (r && r.ruler === c.id) {
+      const war = atWar(s, r.id, s.playerRealm);
+      body.append(h('div.section', null, h('h4', null, `${r.kind} of ${r.name}`),
+        h('div', null, `${provincesOf(s, r.id).length} provinces · ${r.levies} levies · House ${r.house}`),
+        h('div.muted', null, allied(s, r.id, s.playerRealm) ? '🤝 Allied with you' : war ? '⚔ At war with you' : 'Neutral'),
+        war ? h('div', { style: { marginTop: '6px', cursor: 'pointer' }, onclick: () => openWar(this, war.id) }, warBar(scoreFor(s, war))) : null,
+        h('button.btn.small', { style: { marginTop: '6px' }, onclick: () => this.goToRealm(r.id), 'data-tip': tipHTML('Show on map', `Fly to ${esc(r.name)}.`) }, '🗺 Show on map')));
+      // anyone's court is public knowledge: who holds their offices (the family is shown above)
+      const kin = new Set([c.spouse, ...(c.children || []), ...(c.parents || [])]);
+      const crt = Object.values(s.chars).filter(x => x.alive && x.realm === r.id && x.court && x.id !== c.id && !kin.has(x.id) && ['chancellor', 'marshal', 'steward', 'spymaster', 'priest', 'banker', 'jester', 'courtier'].includes(x.role));
+      if (crt.length) body.append(h('div.section', null, h('h4', null, `Court of ${r.name}`), h('div.family', null, crt.slice(0, 10).map(x => this.medal(x, roleLabel(s, x).split(' of ')[0])))));
+    }
+    const hist = s.chronicle.filter(e => e.chars && e.chars.includes(c.id)).slice(-5).reverse();
+    if (hist.length) body.append(h('div.section', null, h('h4', null, 'Shared history'), hist.map(e => h('div.entry', null, h('span.y', null, e.y), this.link(e.text, e.chars)))));
+  }
+
+  /** Public marks, exile, illegitimacy: the things people say about someone. */
+  tagsEl(c) {
+    const s = this.state, tags = [];
+    for (const m of c.marks || []) { const S = SINS[m.k]; if (S) tags.push(h('span.trait.sin', { 'data-tip': tipHTML(S.label, `Publicly known to have ${esc(S.gloss)}. Since ${m.y}.`) }, `${S.icon} ${S.label}`)); }
+    if (c.bastard) tags.push(h('span.trait', { 'data-tip': tipHTML('Illegitimate', c.legit ? 'Legitimised: may inherit.' : 'Cannot inherit unless legitimised.') }, c.legit ? '📜 Legitimised' : '👶 Illegitimate'));
+    if (c.exiled && s.realms[c.exiled.from]) tags.push(h('span.trait', { 'data-tip': tipHTML('Exile', `Driven from ${esc(s.realms[c.exiled.from].name)}, and claims its throne.`) }, '🚪 Exile'));
+    if (c.guard > s.turn) tags.push(h('span.trait', { 'data-tip': 'Guarded' }, '🛡 Guarded'));
+    return tags.length ? h('div.traits', { style: { margin: '6px 0 0' } }, tags) : null;
+  }
+
+  /** The dark corner of the character page: scheming, gossip, council seats, heirs, wars of faith and claim. */
+  shadowActions(c, btn, hu) {
+    const s = this.state, pl = player(s), r = s.realms[c.realm], out = [];
+    const mine = c.realm === s.playerRealm;
+    if (hu) return out; // other players are never scheme targets
+    if (c.id !== pl.id) {
+      out.push(btn('', { onclick: () => schemeBox(this, c), 'data-tip': tipHTML('Scheme against them', 'Murder, a smear, a seduction, a forged claim. Costs gold; pick who does the dirty work.') }, '🗝 Scheme…'));
+      out.push(btn('', { onclick: () => this.action('gossip', c.id), 'data-tip': tipHTML('Ask for gossip', 'Free. Friends, priests and spymasters talk; the greedy and deceitful may invent things.') }, '🗣 Gossip · free'));
+      out.push(btn('', { disabled: s.gold < 20, onclick: () => this.action('investigate', c.id), 'data-tip': tipHTML('Investigate (20 gold)', 'Your spymaster digs for plots and secrets about them.') }, '🔎 Investigate · 20💰'));
+    }
+    if (mine && c.imprisoned) out.push(btn('', { onclick: () => this.action('interrogate', c.id), 'data-tip': tipHTML('Interrogate', 'Make a prisoner talk: secrets, and the names of their helpers.') }, '🔥 Interrogate'));
+    if (mine && c.id !== pl.id) out.push(btn('', { disabled: s.gold < 40, onclick: () => this.action('guard', c.id), 'data-tip': tipHTML('Guard (40 gold)', 'Armed men shadow them for a few seasons: much harder to murder.') }, '🛡 Guard · 40💰'));
+    const family = ['spouse', 'heir', 'child'].includes(c.role);
+    if (c.id !== pl.id && !family && r && r.ruler !== c.id && ageOf(s, c) >= 16 && !c.imprisoned) {
+      out.push(btn('', { onclick: async () => {
+        const stat = { chancellor: 'dip', marshal: 'mar', steward: 'stw', spymaster: 'int', priest: 'dip' };
+        const role = await chooseBox({ title: `Name ${c.name} to the council`, icon: '🏛', text: mine ? 'Which office? Whoever holds it now will resent being replaced.' : `Lure ${c.name} from ${r ? r.name : 'abroad'}. Their ruler will not be pleased.`, choices: COUNCIL.map(k => ({ value: k, label: `${k} (skill ${c.stats[stat[k]]})` })) });
+        if (role) this.action('appoint', role, c.id);
+      }, 'data-tip': tipHTML(mine ? 'Appoint to the council' : 'Invite to your council', 'Pick the office.') }, mine ? '🏛 Appoint' : '🏛 Invite'));
+    }
+    if (pl.children && pl.children.includes(c.id) && mine) {
+      if (c.bastard && !c.legit) out.push(btn('', { disabled: s.gold < 40, onclick: () => this.action('legitimise', c.id), 'data-tip': tipHTML('Legitimise (40 gold)', 'Make them a lawful child.') }, '📜 Legitimise · 40💰'));
+      else if (heirOf(s, pl) && heirOf(s, pl).id !== c.id) out.push(btn('', { onclick: async () => { if (await confirmBox({ title: `Name ${c.name} heir?`, icon: '👑', text: `${heirOf(s, pl).name} will be passed over, and will not forget it.`, ok: 'Name them', cancel: 'Not yet' })) this.action('heir', c.id); }, 'data-tip': tipHTML('Name as heir', 'Favouring a younger child breeds jealousy.') }, '👑 Name heir'));
+    }
+    if (r && r.ruler === c.id && r.id !== s.playerRealm && !atWar(s, r.id, s.playerRealm)) {
+      if (!holyBlock(s, this.map, s.playerRealm, r.id)) out.push(btn('', { onclick: async () => { if (await confirmBox({ title: 'A holy war?', icon: '☩', danger: true, text: `On ${r.name}, for the faith. Co-believers may march with you; their allies and yours will be drawn in.`, ok: 'Raise the banner', cancel: 'Not now' })) this.action('holyWar', r.id); }, 'data-tip': tipHTML('Holy war', 'Different faith, neighbouring realm. The pious cheer.') }, '☩ Holy war'));
+      if (claimsFor(s, s.playerRealm).some(k => k.over === r.id)) out.push(btn('', { onclick: () => this.action('claimWar', r.id), 'data-tip': tipHTML('Press your claim', 'Declare war on the strength of your claim: the war wins more land.') }, '👑 Press claim'));
+    }
+    return out;
+  }
+
+  renderSelf(body) {
+    const s = this.state, pl = player(s), pr = playerRealm(s);
+    body.append(h('div.row', { style: { gap: '4px', marginTop: '8px', flexWrap: 'wrap' } },
+      h('button.btn.small', { disabled: !!this.audience, onclick: () => this.renameBox(), 'data-tip': tipHTML('Rename', 'Change your ruler’s name.') }, '✎ Rename'),
+      this.mp ? h('button.btn.small', { disabled: !!this.audience, onclick: () => this.standInBox(), 'data-tip': tipHTML('Your stand-in', 'Auto replies while you are away, and what they should say.') }, '🗣 Stand-in: ' + ((this.mp.meta.auto || {}).on === false ? 'off' : 'on')) : null));
+    const tabs = h('div.row', { style: { gap: '4px', marginTop: '10px' } },
+      ['self', 'court'].map(t => h('button.btn.small' + (this.tab === t ? '.dark' : ''), { onclick: () => { this.tab = t; this.renderPanel(); }, 'data-tip': t === 'self' ? 'Your family, lands, wars and promises' : 'Your council and courtiers' }, t === 'self' ? 'Family & Realm' : 'Court & Council')));
+    body.append(tabs);
+    if (this.tab === 'court') {
+      const cn = council(s);
+      body.append(h('div.section', null, h('h4', null, 'Council'), COUNCIL.map(role => cn[role] ? this.courtRow(cn[role]) : h('div.muted', null, `${role}: vacant`))));
+      const others = livingCourt(s, s.playerRealm).filter(c => c.id !== pl.id && !COUNCIL.includes(c.role) || c.imprisoned);
+      body.append(h('div.section', null, h('h4', null, 'Court'), others.map(c => this.courtRow(c))));
+      return;
+    }
+    body.append(this.familyEl(pl));
+    const lockSelf = !!this.audience;
+    const feastLeft = s.flags.lastFeast == null ? 0 : Math.max(0, 3 - (s.turn - s.flags.lastFeast));
+    body.append(h('div.section', null, h('h4', null, 'Rule the realm'),
+      h('div.row', { style: { gap: '4px', flexWrap: 'wrap', alignItems: 'center' } }, h('span.muted', null, 'Taxes '),
+        Object.entries(TAX).map(([k, t]) => h('button.btn.small' + (s.tax === k || (!s.tax && k === 'normal') ? '.dark' : ''), { disabled: lockSelf, onclick: () => this.action('tax', k), 'data-tip': tipHTML(`${t.label} taxes`, `Gold ×${t.mult}. People's mood ${t.mood >= 0 ? '+' : ''}${t.mood} a season.<br>${t.desc}`) }, t.label))),
+      h('div.row', { style: { gap: '4px', flexWrap: 'wrap', marginTop: '6px' } },
+        h('button.btn.small', { disabled: lockSelf || s.gold < 45 || feastLeft > 0, onclick: () => this.action('feast'), 'data-tip': tipHTML('Hold a feast (45 gold)', feastLeft ? `The kitchens need ${feastLeft} more season(s).` : '+6 prestige, the people cheer (+10 mood), and the court warms to you.') }, '🍖 Feast'),
+        h('button.btn.small', { disabled: lockSelf || s.gold < 40, onclick: () => this.action('hire'), 'data-tip': tipHTML('Hire mercenaries (40 gold)', '+120 men, up to a little over your usual maximum.') }, '🗡 Hire troops'))));
+    body.append(h('div.section', null, h('h4', null, `${pr.kind} of ${pr.name}`),
+      h('div', null, `${provincesOf(s, pr.id).length} provinces · ${pr.levies}/${maxLevies(s, pr.id)} levies · income ${income(s)}/season · people ${moodTier(s.mood == null ? 60 : s.mood).toLowerCase()}`),
+      s.alliances.filter(a => a.includes(pr.id)).map(a => h('div', null, '🤝 Allied with ', s.realms[a[0] === pr.id ? a[1] : a[0]].name)),
+      warsOf(s).map(w => h('div.war-mini', { onclick: () => openWar(this, w.id), 'data-tip': 'Click for the war' }, h('div', { style: { color: 'var(--red)' } }, `⚔ War with ${s.realms[w.attacker === pr.id ? w.defender : w.attacker].name}`), warBar(scoreFor(s, w), { small: true }))),
+      h('button.btn.small', { style: { marginTop: '6px' }, onclick: () => this.goHome(), 'data-tip': tipHTML('Go home', 'Show your lands on the map.') }, '⌂ Show my lands')));
+    const open = s.promises.filter(p => p.status === 'open');
+    body.append(h('div.section', null, h('h4', null, 'Open promises'), open.length ? open.map(p => this.promiseEl(p, true)) : h('div.muted', null, 'None. Your word is unburdened.')));
+    if (s.reigns.length > 1) body.append(h('div.section', null, h('h4', null, 'Your forebears'), s.reigns.slice(0, -1).map(r => h('div', null, `${r.name} (${r.from}–${r.to}) `, h('i.muted', null, r.rep || '')))));
+  }
+
+  courtRow(c) {
+    const s = this.state, op = opinionOf(s, c).total;
+    return h('div.court-row', { onclick: () => this.selectChar(c.id) },
+      h('div.medal.sm' + (c.imprisoned ? '.jailed' : ''), null, h('img', { src: stillURL(s, c, 80, moodExpr(op)) })),
+      h('div.who', null, c.name, c.house ? ` ${c.house}` : '', ' ', sexMark(c), h('br'), h('small', null, roleLabel(s, c))), opinionBadge(op));
+  }
+
+  familyEl(c) {
+    const s = this.state, rel = [];
+    const add = (id, label) => { const k = s.chars[id]; if (k) rel.push(this.medal(k, label)); };
+    if (c.parents) c.parents.forEach((id, i) => add(id, i === 0 ? 'Parent' : 'Parent'));
+    if (c.spouse) add(c.spouse, 'Spouse');
+    (c.children || []).forEach(id => add(id, s.chars[id].role === 'heir' ? 'Heir' : (s.chars[id].sex === 'm' ? 'Son' : 'Daughter')));
+    if (c.parents) for (const o of Object.values(s.chars)) if (o.id !== c.id && o.alive && o.parents && o.parents.some(p => c.parents.includes(p))) add(o.id, o.sex === 'm' ? 'Brother' : 'Sister');
+    return rel.length ? h('div.section', null, h('h4', null, 'Family'), h('div.family', null, rel)) : h('div');
+  }
+  /** Friends, rivals and kin of this character, with how warmly they regard each other. */
+  relationsEl(c) {
+    const s = this.state;
+    const list = relationshipsOf(s, c).filter(x => x.c.alive || x.kin).slice(0, 10);
+    if (!list.length) return h('div');
+    return h('div.section', null, h('h4', { 'data-tip': tipHTML('Relationships', `How ${esc(c.name)} regards others (−100 to +100). Family starts warm; friendships and feuds form over time.`) }, 'Relationships'),
+      h('div.family', null, list.map(x => {
+        const m = this.medal(x.c, `${x.label} ${x.v > 0 ? '+' : ''}${x.v}`);
+        m.setAttribute('data-tip', tipHTML(`${esc(x.c.name)}: ${esc(x.label)}`, `${esc(c.name)} regards them at ${x.v > 0 ? '+' : ''}${x.v}.${x.kin && x.label !== x.kin ? ' ' + esc(x.kin) + '.' : ''}`));
+        if (x.v <= -25) m.classList.add('foe'); else if (x.v >= 25) m.classList.add('fond');
+        return m;
+      })));
+  }
+  medal(c, label) {
+    const s = this.state;
+    return h('div.medal-wrap', { onclick: () => this.selectChar(c.id) },
+      h('div.medal.sm' + (c.alive ? '' : '.dead'), null, h('img', { src: stillURL(s, c, 80) })), h('span', null, c.name, ' ', sexMark(c)), h('span.muted', null, label));
+  }
+  promiseEl(p, showTo) {
+    const s = this.state;
+    return h('div.promise.' + p.status, { onclick: showTo ? () => this.selectChar(p.to) : null, style: showTo ? { cursor: 'pointer' } : null },
+      showTo ? h('b', null, s.chars[p.to].name + ': ') : null, `"${p.text}"`, h('div.muted', { style: { fontSize: '12px' } },
+        p.status === 'open' ? `Due in ${Math.max(0, p.due - s.turn)} season(s)` : p.status.toUpperCase()),
+      p.status === 'open' ? this.keepBtn(p) : null);
+  }
+  /** "Keep it now" for an open promise: pays the gold, declares the war, or honours it. */
+  keepBtn(p, after, opts) {
+    const k = keepCost(this.state, this.map, p);
+    const lock = !!this.audience && !(opts && opts.inAudience);
+    return h('button.btn.small.keep-btn', { disabled: !k.ok || lock, 'data-tip': lock ? tipHTML('In an audience', 'Finish your audience first.') : k.ok ? tipHTML('Keep your word now', 'No need to wait for the deadline.') : tipHTML('Not yet', esc(k.why || '')),
+      onclick: async e => { e.stopPropagation(); const r = await this.keepPromise(p); if (r && r.ok && after) after(); } }, '🤞 ' + k.label);
+  }
+  async keepPromise(p) {
+    const s = this.state, k = keepCost(s, this.map, p);
+    if (p.kind === 'war' && /War on/.test(k.label)) {
+      const t = s.realms[p.target];
+      if (!await confirmBox({ title: 'Keep your word?', icon: '⚔', danger: true, ok: 'To war!', cancel: 'Not yet', text: `Declare war on ${t.name}: ${t.levies} men against your ${playerRealm(s).levies}.` })) return null;
+      sfx('drums');
+    }
+    return this.action('keep', p.id);
+  }
+
+  writeLetter(realmId, c) {
+    const ta = h('textarea.field', { maxlength: 300, rows: 4, placeholder: `To ${fullName(this.state, c)}…`, style: { width: '100%', resize: 'vertical' } });
+    const back = h('div.modal-back', null, h('div.panel.options', null, h('div.titlebar', null, 'A Letter', h('button.x', { onclick: () => back.remove(), 'data-tip': 'Tear it up' }, '✕')),
+      h('div.body', null, ta, h('div.row', { style: { justifyContent: 'flex-end', marginTop: '10px' } },
+        h('button.btn.dark', { onclick: async () => { const t = ta.value.trim(); if (!t) return; back.remove(); await this.action('letter', realmId, t); }, 'data-tip': tipHTML('Send', 'It arrives at once. They can reply.') }, '✉ Seal and send')))));
+    document.body.append(back);
+    draggable(back.firstChild, { handle: back.firstChild.querySelector('.titlebar') });
+    ta.focus();
+  }
+
+  async declareWar(r) {
+    const s = this.state, betray = allied(s, r.id, s.playerRealm);
+    const ok = await confirmBox({
+      title: 'Declare war?', icon: '⚔', danger: true, ok: 'To war!', cancel: 'Not yet',
+      text: `On ${r.name}: ${r.levies} men against your ${playerRealm(s).levies}. One battle each season until someone wins.${betray ? ' This BETRAYS your alliance, and everyone will know.' : ''}`,
+    });
+    if (ok) { sfx('drums'); await this.action('war', r.id); }
+  }
+  async proposeMarriage(c, fam) {
+    const s = this.state, pl = player(s);
+    let who = fam[0];
+    if (fam.length > 1) {
+      const id = await chooseBox({ title: 'A match for whom?', icon: '💍', text: `Who should marry ${c.name}?`,
+        choices: fam.map(w => ({ value: w.id, label: `${w.id === pl.id ? 'You' : w.name + ' (' + roleLabel(s, w) + ')'}: ${marriageChance(s, c, w)}%`, tip: tipHTML('Chance they accept', 'Better if they like you, their ruler likes you, and you have prestige.') })) });
+      if (!id) return;
+      who = s.chars[id];
+    }
+    const ok = await confirmBox({ title: 'Propose marriage?', icon: '💍', ok: 'Propose', cancel: 'Not now',
+      text: `${who.id === pl.id ? 'You' : who.name} and ${c.name}. About ${marriageChance(s, c, who)}% likely to accept.${c.realm !== s.playerRealm ? ` ${c.name} would join your court.` : ''}` });
+    if (ok) await this.action('marry', c.id, who.id === pl.id ? null : who.id);
+  }
+  giftAmount() { const g = this.state.gold; return g < 25 ? Math.max(5, Math.floor(g / 5) * 5) : Math.max(25, Math.min(100, Math.round(g / 8 / 5) * 5)); }
+  /** Gift sizes on offer: the usual one when you are flush, small ones when you are not, flowers always free. */
+  giftOptions() { const g = this.state.gold; return g >= 25 ? [this.giftAmount()] : [5, 10, 15, 20].filter(a => a <= g); }
+  act(res) {
+    if (res && res.msg) toast(res.msg, res.ok ? '✔' : '✖');
+    if (this.state.flags.mapDirty) this.view.invalidate();
+    this.refresh(); this.flush(); this.save();
+    if (this.state.gameOver) this.gameOver();
+  }
+}
